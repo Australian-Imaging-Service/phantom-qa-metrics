@@ -504,7 +504,7 @@ def _task_generate_plots(
     ext = ".html" if output_format == "html" else ".png"
 
     def _matches(stem: str, token: str) -> bool:
-        return bool(re.search(rf"(?<![a-z0-9]){token}(?![a-z0-9])", stem.lower()))
+        return bool(re.search(rf"(?<![a-z0-9]){token}(?![a-z])", stem.lower()))
 
     # Prefer a T1/MPRAGE image as the viewer background (same subject space as
     # vials); fall back to the first matching contrast if none is found.
