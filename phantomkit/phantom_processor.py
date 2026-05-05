@@ -477,6 +477,7 @@ def _task_generate_plots(
     template_dir: str,
     metrics_sentinel: str,  # enforces Step 3 → Step 4 ordering; not used in body
     output_format: str = "html",
+    filename_prefix: str = "",
 ) -> str:
     """Generate per-contrast scatter plots and parametric map plots (IR / TE).
 
@@ -548,7 +549,12 @@ def _task_generate_plots(
         # IR/TE individual contrasts always use PNG — the T1/T2 mapping HTML
         # covers the full fitted plots; per-TI/TE scatter PNGs save disk space.
         file_ext = ".png" if is_ir_or_te else ext
-        output_plot = str(plots_dir / f"{contrast_name}{file_ext}")
+        _basename = (
+            f"{filename_prefix}_{contrast_name}"
+            if (file_ext == ".html" and filename_prefix)
+            else contrast_name
+        )
+        output_plot = str(plots_dir / f"{_basename}{file_ext}")
 
         if output_format == "html" and not is_ir_or_te:
             try:
@@ -629,7 +635,12 @@ def _task_generate_plots(
         )
 
         _plot_name, _fits_name = _mapping_names[contrast_type_key]
-        output_plot = str(plots_dir / f"{_plot_name}{ext}")
+        _map_name = (
+            f"{filename_prefix}_{_plot_name}"
+            if (ext == ".html" and filename_prefix)
+            else _plot_name
+        )
+        output_plot = str(plots_dir / f"{_map_name}{ext}")
         _fits_output = str(fits_dir / f"{_fits_name}.csv")
         first_file = matching[0]
 
@@ -812,6 +823,7 @@ def PhantomSessionWf(
     template_dir_parent: str,
     contrast_files: list,
     output_format: str = "html",
+    filename_prefix: str = "",
 ) -> str:
     """
     End-to-end phantom QC workflow.
@@ -883,6 +895,7 @@ def PhantomSessionWf(
             template_dir=template_dir_parent,
             metrics_sentinel=metrics.sentinel,
             output_format=output_format,
+            filename_prefix=filename_prefix,
         ),
         name="generate_plots",
     )
@@ -943,10 +956,12 @@ class PhantomProcessor:
         template_dir: str,
         output_base_dir: str,
         output_format: str = "html",
+        filename_prefix: str = "",
     ):
         self.template_dir = Path(template_dir)
         self.output_base_dir = Path(output_base_dir)
         self.output_format = output_format
+        self.filename_prefix = filename_prefix
 
         # Phantom name is the last component of template_dir (e.g. "SPIRIT")
         self.phantom_name = self.template_dir.name
@@ -1031,6 +1046,7 @@ class PhantomProcessor:
             template_dir_parent=str(self.template_dir.parent),
             contrast_files=contrast_files,
             output_format=self.output_format,
+            filename_prefix=self.filename_prefix,
         )
         cache_dir = str(output_dir / ".pydra_cache")
         sub = Submitter(worker="cf", cache_root=cache_dir)

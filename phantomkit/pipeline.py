@@ -353,6 +353,7 @@ def run_stage2(
     output_dir: Path,
     template_dir: Path,
     dry_run: bool,
+    input_identifier: str = "",
 ):
     """
     For each DWI output directory, run PhantomProcessor on
@@ -394,6 +395,7 @@ def run_stage2(
         processor = PhantomProcessor(
             template_dir=str(template_dir),
             output_base_dir=str(output_dir),
+            filename_prefix=input_identifier,
         )
         processor.process_session(str(t1_in_dwi))
         print()
@@ -469,6 +471,7 @@ def run_stage3(
     template_dir: Path,
     scan_info: dict,
     dry_run: bool,
+    input_identifier: str = "",
 ):
     """
     Convert T1, IR, and TE DICOMs to NIfTI into a staging folder, then
@@ -549,6 +552,7 @@ def run_stage3(
     processor = PhantomProcessor(
         template_dir=str(template_dir),
         output_base_dir=str(output_dir),
+        filename_prefix=input_identifier,
     )
     processor.process_session(str(t1_nii_path))
 
@@ -612,6 +616,20 @@ def validate_inputs(args):
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
+
+
+def _cleanup_tmp_only_dirs(output_dir: Path) -> None:
+    """Remove subdirectories of output_dir that contain only tmp-like directories."""
+    _tmp_pattern = re.compile(r"^(tmp|\.pydra)", re.IGNORECASE)
+    for d in sorted(output_dir.iterdir()):
+        if not d.is_dir():
+            continue
+        children = list(d.iterdir())
+        if not children:
+            continue
+        if all(c.is_dir() and _tmp_pattern.match(c.name) for c in children):
+            shutil.rmtree(d)
+            print(f"  Removed tmp-only directory: {d.name}")
 
 
 def main():
@@ -683,6 +701,7 @@ def main():
     output_dir = Path(args.output_dir).resolve()
     phantom = args.phantom
     template_dir = TEMPLATE_DATA_ROOT / phantom
+    input_identifier = derive_session_name(input_dir)
 
     validate_inputs(args)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -762,14 +781,14 @@ def main():
 
     # Stage 2 — Phantom QC in DWI space (follows Stage 1)
     if run_stage1_flag:
-        run_stage2(dwi_output_dirs, output_dir, template_dir, args.dry_run)
+        run_stage2(dwi_output_dirs, output_dir, template_dir, args.dry_run, input_identifier)
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")
 
     # Stage 3 — Phantom QC on native contrasts
     if run_stage3_flag:
-        run_stage3(input_dir, output_dir, template_dir, scan_info, args.dry_run)
+        run_stage3(input_dir, output_dir, template_dir, scan_info, args.dry_run, input_identifier)
     else:
         print_header("STAGE 3 — Phantom QC on Native Contrasts")
         if not scan_info["t1_dirs"]:
@@ -783,6 +802,10 @@ def main():
     else:
         print_header("STAGE 4 — Calibration Temperature Estimation")
         print("  Skipped: no DWI acquisitions found.\n")
+
+    # ── Cleanup tmp-only directories ─────────────────────────────────────────
+    if not args.dry_run:
+        _cleanup_tmp_only_dirs(output_dir)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_header("Pipeline Complete")

@@ -344,7 +344,7 @@ def GeneratePlots(
 
     # Parametric map plots (IR and TE)
     def _matches(stem: str, token: str) -> bool:
-        return bool(_re.search(rf"(?<![a-z0-9]){token}(?![a-z0-9])", stem.lower()))
+        return bool(_re.search(rf"(?<![a-z0-9]){token}(?![a-z])", stem.lower()))
 
     _mapping_names = {
         "ir": ("T1_mapping", "T1_fits"),
