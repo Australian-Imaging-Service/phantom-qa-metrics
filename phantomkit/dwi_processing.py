@@ -1517,18 +1517,22 @@ def copy_final_outputs_task(
     out_dir: str,
     dwi_preproc_name: str,
     t1_output_name: str,
+    dwi_raw_mif: str = "",
 ):
     os.makedirs(out_dir, exist_ok=True)
     dst_dwi = str(Path(out_dir) / dwi_preproc_name)
     dst_t1 = str(Path(out_dir) / t1_output_name)
     dst_adc = str(Path(out_dir) / "ADC.nii.gz")
     dst_fa = str(Path(out_dir) / "FA.nii.gz")
-    for src, dst in [
+    copies = [
         (dwi_biascorr_mif, dst_dwi),
         (t1_in_dwi, dst_t1),
         (adc_nii, dst_adc),
         (fa_nii, dst_fa),
-    ]:
+    ]
+    if dwi_raw_mif and Path(dwi_raw_mif).exists():
+        copies.append((dwi_raw_mif, str(Path(out_dir) / "DWI_raw.mif.gz")))
+    for src, dst in copies:
         shutil.copy2(src, dst)
         print(f"  Copied: {Path(dst).name}")
     return dst_dwi  # sentinel: used by cleanup ordering
@@ -1985,6 +1989,7 @@ def build_dwi_workflow(plan: dict):
                     out_dir=out_dir,
                     dwi_preproc_name=dwi_preproc_name,
                     t1_output_name=t1_output_name,
+                    dwi_raw_mif=dwi_raw_mif,
                 ),
                 name="copy_outputs",
             )

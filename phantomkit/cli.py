@@ -3,6 +3,7 @@
 import importlib
 import logging
 import pkgutil
+import shutil
 from pathlib import Path
 from typing import get_args, get_origin
 
@@ -513,6 +514,26 @@ def run_pipeline(
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")
+
+    # Remove staging-only DWI directories (contain only tmp/, no final outputs).
+    # These are created by convert_all_candidates for candidate series that were
+    # not selected as the main DWI output (e.g. RPE pair b=0 volumes).
+    if run_stage1_flag and not cfg.get("nocleanup"):
+        _t1_markers = {"T1_in_DWI_space.nii.gz", "T1.nii.gz"}
+        for d in sorted(output_path.iterdir()):
+            if not d.is_dir():
+                continue
+            if any((d / m).exists() for m in _t1_markers):
+                continue  # real DWI output dir — leave it alone
+            if (d / "tmp").exists() and not any(
+                p for p in d.iterdir()
+                if p.name != "tmp" and not p.name.startswith(".")
+            ):
+                try:
+                    shutil.rmtree(d)
+                    print(f"  Removed staging dir: {d.name}")
+                except Exception as e:
+                    print(f"  Warning: could not remove {d.name}: {e}")
 
     print_header("Pipeline Complete")
     print(f"  All outputs written to: {output_path}\n")

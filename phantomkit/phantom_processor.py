@@ -467,6 +467,253 @@ def _task_extract_metrics(
     return output_metrics_dir  # sentinel for downstream ordering
 
 
+def _extract_dwi_stats(
+    dwi_mif: Path,
+    vial_masks_list: List[Path],
+    tmp_dir: Path,
+    prefix: str = "",
+) -> tuple:
+    """Convert a DWI MIF to NIfTI and extract per-vial per-volume mean/std.
+
+    Returns (means, stds, n_vols, vial_names) where means/stds are
+    dicts mapping vial name → list of per-volume floats (or None).
+    """
+    import math
+
+    pfx = f"{prefix}_" if prefix else ""
+    dwi_nii = tmp_dir / f"{pfx}DWI_tmp.nii.gz"
+    result = subprocess.run(
+        ["mrconvert", "-quiet", str(dwi_mif), str(dwi_nii), "-force"],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"mrconvert {dwi_mif.name} failed: {result.stderr}")
+
+    result = subprocess.run(
+        ["mrinfo", "-size", str(dwi_nii)], capture_output=True, text=True
+    )
+    size_info = result.stdout.strip().split()
+    n_vols = int(size_info[3]) if len(size_info) >= 4 else 1
+
+    means: Dict[str, List] = {}
+    stds: Dict[str, List] = {}
+
+    for vial_mask in sorted(vial_masks_list):
+        vial_name = (
+            Path(vial_mask).name.replace(".nii.gz", "").replace(".nii", "").split(".")[0]
+        )
+        regridded = str(tmp_dir / f"{pfx}DWI_{vial_name}.nii")
+        result = subprocess.run(
+            ["mrgrid", "-template", str(dwi_nii), str(vial_mask), "regrid",
+             regridded, "-interp", "nearest", "-datatype", "bit", "-force"],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0:
+            print(f"    ⚠ mrgrid failed for {vial_name} ({prefix or 'proc'}), skipping")
+            continue
+
+        means[vial_name] = []
+        stds[vial_name] = []
+
+        for vol_idx in range(n_vols):
+            if n_vols == 1:
+                vol_file = str(dwi_nii)
+            else:
+                vol_file = str(tmp_dir / f"{pfx}DWI_vol{vol_idx}.nii.gz")
+                subprocess.run(
+                    ["mrconvert", str(dwi_nii), "-coord", "3", str(vol_idx),
+                     vol_file, "-quiet", "-force"],
+                    check=True, capture_output=True,
+                )
+            result = subprocess.run(
+                ["mrstats", "-quiet", vol_file,
+                 "-output", "mean", "-output", "std", "-mask", regridded],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0 or not result.stdout.strip():
+                means[vial_name].append(None)
+                stds[vial_name].append(None)
+                continue
+            vals = result.stdout.strip().split()
+            means[vial_name].append(float(vals[0]))
+            stds[vial_name].append(float(vals[1]))
+
+    return means, stds, n_vols, list(means.keys())
+
+
+def _compute_snr_cnr(means, stds, vial_names, n_vols) -> tuple:
+    """Compute SNR and CNR from extracted per-vial per-volume stats.
+
+    Returns (snr_dict, cnr_dict) where:
+      snr_dict[vial] = [snr_vol0, snr_vol1, ...]
+      cnr_dict[vi][vj] = [cnr_vol0, ...] (upper triangle, j > i)
+    """
+    import math
+
+    noise_name = next((v for v in vial_names if v.upper() == "NOISE"), None)
+    if noise_name is None:
+        raise RuntimeError("Noise vial not found (expected a vial named 'Noise')")
+    noise_std_list = stds[noise_name]
+
+    def _safe_div(a, b):
+        if a is None or b is None or b == 0.0:
+            return None
+        v = a / b
+        return None if (math.isnan(v) or math.isinf(v)) else v
+
+    snr: Dict[str, List] = {
+        vn: [_safe_div(means[vn][k], noise_std_list[k]) for k in range(n_vols)]
+        for vn in vial_names
+    }
+
+    cnr_dict: Dict[str, Dict[str, List]] = {}
+    cnr_rows = []
+    for i, vi in enumerate(vial_names):
+        for j, vj in enumerate(vial_names):
+            if j <= i:
+                continue
+            cnr_vals = []
+            for k in range(n_vols):
+                mi = means[vi][k]
+                mj = means[vj][k]
+                ns = noise_std_list[k]
+                if mi is None or mj is None or ns is None or ns == 0.0:
+                    cnr_vals.append(None)
+                else:
+                    v = abs(mi - mj) / ns
+                    cnr_vals.append(None if (math.isnan(v) or math.isinf(v)) else v)
+            cnr_dict.setdefault(vi, {})[vj] = cnr_vals
+            cnr_rows.append({
+                "pair": f"{vi} vs {vj}",
+                **{f"vol{k}": v for k, v in enumerate(cnr_vals)},
+            })
+    return snr, cnr_dict, cnr_rows
+
+
+def _extract_meanb0(dwi_mif: Path, tmp_dir: Path, prefix: str = "") -> Optional[str]:
+    """Extract mean b=0 image from a DWI MIF file. Falls back to vol 0."""
+    pfx = f"{prefix}_" if prefix else ""
+    meanb0 = str(tmp_dir / f"{pfx}meanb0.nii.gz")
+    try:
+        b0_tmp = str(tmp_dir / f"{pfx}b0_vols.mif")
+        res = subprocess.run(
+            ["dwiextract", "-bzero", str(dwi_mif), b0_tmp, "-force"],
+            capture_output=True, text=True,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(f"dwiextract: {res.stderr}")
+        subprocess.run(
+            ["mrmath", b0_tmp, "mean", meanb0, "-axis", "3", "-force"],
+            check=True, capture_output=True,
+        )
+        return meanb0 if Path(meanb0).exists() else None
+    except Exception as exc:
+        print(f"    ⚠ Mean b=0 extraction failed ({exc}); using vol 0")
+        vol0 = str(tmp_dir / f"{pfx}DWI_vol0.nii.gz")
+        if not Path(vol0).exists():
+            dwi_nii = str(tmp_dir / f"{pfx}DWI_tmp.nii.gz")
+            subprocess.run(
+                ["mrconvert", dwi_nii, "-coord", "3", "0",
+                 vol0, "-quiet", "-force"],
+                capture_output=True,
+            )
+        return vol0 if Path(vol0).exists() else None
+
+
+def _process_dwi_html(
+    *,
+    dwi_mif: Path,
+    vial_masks_list: List[Path],
+    vial_niftis_map: dict,
+    xlsx_dir: Path,
+    tmp_dir: Path,
+    session_name: str,
+    filename_prefix: str,
+    plots_dir: Path,
+) -> None:
+    """Extract per-vial DWI stats, compute SNR/CNR, write xlsx, build DWI.html."""
+    from phantomkit.plotting.dwi_html import build_dwi_html
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # ── Preprocessed DWI (always present) ────────────────────────────────────
+    print(f"  DWI: extracting stats from preprocessed...")
+    means_p, stds_p, n_vols, vial_names = _extract_dwi_stats(
+        dwi_mif, vial_masks_list, tmp_dir, prefix="proc"
+    )
+    if not means_p:
+        raise RuntimeError("No vial stats extracted from preprocessed DWI")
+
+    print(f"  DWI: {n_vols} volume(s), {len(vial_names)} vials")
+    snr_p, cnr_p, cnr_rows_p = _compute_snr_cnr(means_p, stds_p, vial_names, n_vols)
+
+    # ── Raw DWI (optional) ────────────────────────────────────────────────────
+    raw_mif = dwi_mif.parent / "DWI_raw.mif.gz"
+    has_raw = raw_mif.exists()
+    means_r = stds_r = snr_r = cnr_r = cnr_rows_r = None
+    if has_raw:
+        print(f"  DWI: extracting stats from raw...")
+        means_r, stds_r, _, _ = _extract_dwi_stats(
+            raw_mif, vial_masks_list, tmp_dir, prefix="raw"
+        )
+        if means_r:
+            snr_r, cnr_r, cnr_rows_r = _compute_snr_cnr(means_r, stds_r, vial_names, n_vols)
+        else:
+            has_raw = False
+
+    # ── Write DWI.xlsx ────────────────────────────────────────────────────────
+    xlsx_file = xlsx_dir / "DWI.xlsx"
+    _sheets: Dict[str, List] = {}
+
+    def _make_rows(data, label):
+        return [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(data[vn])}}
+                for vn in vial_names]
+
+    _sheets["mean_proc"]  = _make_rows(means_p, "mean_proc")
+    _sheets["std_proc"]   = _make_rows(stds_p,  "std_proc")
+    _sheets["SNR_proc"]   = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_p[vn])}} for vn in vial_names]
+    _sheets["CNR_proc"]   = cnr_rows_p
+    if has_raw:
+        _sheets["mean_raw"] = _make_rows(means_r, "mean_raw")
+        _sheets["std_raw"]  = _make_rows(stds_r,  "std_raw")
+        _sheets["SNR_raw"]  = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_r[vn])}} for vn in vial_names]
+        _sheets["CNR_raw"]  = cnr_rows_r
+
+    with pd.ExcelWriter(xlsx_file, engine="openpyxl") as writer:
+        for sheet_name, rows in _sheets.items():
+            if rows:
+                pd.DataFrame(rows).to_excel(writer, sheet_name=sheet_name, index=False)
+    print(f"    Saved: {xlsx_file.name}")
+
+    # ── Extract mean b=0 NIfTIs ───────────────────────────────────────────────
+    meanb0_proc = _extract_meanb0(dwi_mif, tmp_dir, prefix="proc")
+    meanb0_raw  = _extract_meanb0(raw_mif, tmp_dir, prefix="raw") if has_raw else None
+    if meanb0_proc:
+        print("    ✓ Extracted mean b=0 (preprocessed)")
+    if meanb0_raw:
+        print("    ✓ Extracted mean b=0 (raw)")
+
+    # ── Build DWI.html ────────────────────────────────────────────────────────
+    def _snr_matrix(snr_dict):
+        return [[snr_dict[vn][k] for vn in vial_names] for k in range(n_vols)]
+
+    _dwi_name = f"{filename_prefix}_DWI" if filename_prefix else "DWI"
+    output_html = str(plots_dir / f"{_dwi_name}.html")
+
+    build_dwi_html(
+        meanb0_nii=meanb0_proc,
+        vial_niftis=vial_niftis_map,
+        snr_data={"vials": vial_names, "n_vols": n_vols, "snr": _snr_matrix(snr_p)},
+        cnr_data={"vials": vial_names, "n_vols": n_vols, "cnr": cnr_p},
+        session_name=session_name,
+        output_file=output_html,
+        raw_meanb0_nii=meanb0_raw,
+        raw_snr_data={"vials": vial_names, "n_vols": n_vols, "snr": _snr_matrix(snr_r)} if has_raw else None,
+        raw_cnr_data={"vials": vial_names, "n_vols": n_vols, "cnr": cnr_r} if has_raw else None,
+    )
+    print(f"    ✓ Generated DWI HTML: {Path(output_html).name}")
+
+
 @python.define(outputs=["sentinel"])
 def _task_generate_plots(
     contrast_files: list,
@@ -690,6 +937,25 @@ def _task_generate_plots(
                 print(f"    ✓ Generated {contrast_type_key.upper()} PNG map plot")
             except Exception as e:
                 print(f"    ✗ {contrast_type_key.upper()} PNG map plot failed: {e}")
+
+    # ── DWI-specific: SNR/CNR xlsx + DWI.html ────────────────────────────────
+    _dwi_mif = metrics_path.parent / "DWI_preproc_biascorr.mif.gz"
+    if _dwi_mif.exists() and output_format == "html":
+        try:
+            _process_dwi_html(
+                dwi_mif=_dwi_mif,
+                vial_masks_list=vial_masks_list,
+                vial_niftis_map=_vial_niftis_map,
+                xlsx_dir=xlsx_dir,
+                tmp_dir=tmp_vial_dir,
+                session_name=session_name,
+                filename_prefix=filename_prefix,
+                plots_dir=plots_dir,
+            )
+        except Exception as e:
+            import traceback
+            print(f"    ✗ DWI HTML generation failed: {e}")
+            traceback.print_exc()
 
     return metrics_dir  # sentinel for downstream ordering
 
@@ -1048,8 +1314,10 @@ class PhantomProcessor:
             output_format=self.output_format,
             filename_prefix=self.filename_prefix,
         )
-        cache_dir = str(output_dir / ".pydra_cache")
-        sub = Submitter(worker="cf", cache_root=cache_dir)
+        cache_dir = output_dir / ".pydra_cache"
+        if cache_dir.exists():
+            shutil.rmtree(cache_dir)
+        sub = Submitter(worker="cf", cache_root=str(cache_dir))
         try:
             sub(wf, rerun=True)
         finally:
