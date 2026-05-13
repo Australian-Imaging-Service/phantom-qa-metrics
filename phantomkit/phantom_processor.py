@@ -590,6 +590,136 @@ def _compute_snr_cnr(means, stds, vial_names, n_vols) -> tuple:
     return snr, cnr_dict, cnr_rows
 
 
+def _process_t1t2_snrcnr_html(
+    *,
+    te_files: List[Path],
+    ir_files: List[Path],
+    vial_niftis_map: dict,
+    xlsx_dir: Path,
+    session_name: str,
+    filename_prefix: str,
+    plots_dir: Path,
+) -> None:
+    """Load per-contrast metrics, compute SNR/CNR, build T1T2_SNRCNR.html."""
+    import math
+    from phantomkit.plotting.t1t2_html import build_t1t2_html
+
+    def _contrast_name(f: Path) -> str:
+        name = f.name
+        for ext in (".nii.gz", ".nii"):
+            if name.endswith(ext):
+                return name[: -len(ext)]
+        return name
+
+    def _safe_div(a, b):
+        if a is None or b is None or b == 0.0:
+            return None
+        v = a / b
+        return None if (math.isnan(v) or math.isinf(v)) else v
+
+    # TE contrasts first, then IR
+    all_contrast_files = te_files + ir_files
+    if not all_contrast_files:
+        return
+
+    contrast_labels = [_contrast_name(f) for f in all_contrast_files]
+
+    # Load mean and std for each contrast from its xlsx
+    contrast_means: Dict[str, Dict[str, Optional[float]]] = {}
+    contrast_stds: Dict[str, Dict[str, Optional[float]]] = {}
+    vial_names: Optional[List[str]] = None
+
+    for f in all_contrast_files:
+        label = _contrast_name(f)
+        xlsx_file = xlsx_dir / f"{label}.xlsx"
+        if not xlsx_file.exists():
+            print(f"    ⚠ xlsx not found for {label}, skipping from T1T2 SNR/CNR")
+            continue
+        try:
+            mean_df = pd.read_excel(xlsx_file, sheet_name="mean")
+            std_df = pd.read_excel(xlsx_file, sheet_name="std")
+        except Exception as e:
+            print(f"    ⚠ Failed to load xlsx for {label}: {e}")
+            continue
+
+        means: Dict[str, Optional[float]] = {}
+        stds: Dict[str, Optional[float]] = {}
+        for _, row in mean_df.iterrows():
+            vn = str(row["vial"]).strip()
+            means[vn] = (
+                float(row["vol0"])
+                if "vol0" in row.index and not pd.isna(row["vol0"])
+                else None
+            )
+        for _, row in std_df.iterrows():
+            vn = str(row["vial"]).strip()
+            stds[vn] = (
+                float(row["vol0"])
+                if "vol0" in row.index and not pd.isna(row["vol0"])
+                else None
+            )
+
+        contrast_means[label] = means
+        contrast_stds[label] = stds
+        if vial_names is None:
+            vial_names = list(means.keys())
+
+    if vial_names is None or not contrast_means:
+        print("    ⚠ No contrast data loaded, skipping T1T2 SNR/CNR HTML")
+        return
+
+    noise_name = next((v for v in vial_names if v.upper() == "NOISE"), None)
+    if noise_name is None:
+        print("    ⚠ Noise vial not found, skipping T1T2 SNR/CNR HTML")
+        return
+
+    # Only include contrasts that were successfully loaded
+    valid_labels = [l for l in contrast_labels if l in contrast_means]
+
+    # SNR matrix: [n_contrasts][n_vials]
+    snr_matrix = []
+    for label in valid_labels:
+        means = contrast_means[label]
+        noise_std = contrast_stds[label].get(noise_name)
+        snr_matrix.append([_safe_div(means.get(vn), noise_std) for vn in vial_names])
+
+    # CNR dict: {v1: {v2: [c0, c1, ...]}} upper triangle
+    cnr_dict: Dict[str, Dict[str, list]] = {}
+    for i, vi in enumerate(vial_names):
+        for j, vj in enumerate(vial_names):
+            if j <= i:
+                continue
+            cnr_vals = []
+            for label in valid_labels:
+                means = contrast_means[label]
+                noise_std = contrast_stds[label].get(noise_name)
+                mi = means.get(vi)
+                mj = means.get(vj)
+                if mi is None or mj is None or noise_std is None or noise_std == 0.0:
+                    cnr_vals.append(None)
+                else:
+                    v = abs(mi - mj) / noise_std
+                    cnr_vals.append(None if (math.isnan(v) or math.isinf(v)) else v)
+            cnr_dict.setdefault(vi, {})[vj] = cnr_vals
+
+    te_nii = str(te_files[0]) if te_files else None
+    ir_nii = str(ir_files[0]) if ir_files else None
+
+    _map_name = f"{filename_prefix}_T1T2_SNRCNR" if filename_prefix else "T1T2_SNRCNR"
+    output_html = str(plots_dir / f"{_map_name}.html")
+
+    build_t1t2_html(
+        te_nii=te_nii,
+        ir_nii=ir_nii,
+        vial_niftis=vial_niftis_map,
+        snr_data={"vials": vial_names, "contrasts": valid_labels, "snr": snr_matrix},
+        cnr_data={"contrasts": valid_labels, "cnr": cnr_dict},
+        session_name=session_name,
+        output_file=output_html,
+    )
+    print(f"    ✓ Generated T1T2 SNR/CNR HTML: {Path(output_html).name}")
+
+
 def _extract_meanb0(dwi_mif: Path, tmp_dir: Path, prefix: str = "") -> Optional[str]:
     """Extract mean b=0 image from a DWI MIF file. Falls back to vol 0."""
     pfx = f"{prefix}_" if prefix else ""
@@ -955,6 +1085,25 @@ def _task_generate_plots(
         except Exception as e:
             import traceback
             print(f"    ✗ DWI HTML generation failed: {e}")
+            traceback.print_exc()
+
+    # ── T1/T2 SNR/CNR HTML ────────────────────────────────────────────────────
+    _te_files = [f for f in contrast_file_paths if _matches(f.stem, "te")]
+    _ir_files = [f for f in contrast_file_paths if _matches(f.stem, "ir")]
+    if (_te_files or _ir_files) and output_format == "html":
+        try:
+            _process_t1t2_snrcnr_html(
+                te_files=_te_files,
+                ir_files=_ir_files,
+                vial_niftis_map=_vial_niftis_map,
+                xlsx_dir=xlsx_dir,
+                session_name=session_name,
+                filename_prefix=filename_prefix,
+                plots_dir=plots_dir,
+            )
+        except Exception as e:
+            import traceback
+            print(f"    ✗ T1T2 SNR/CNR HTML generation failed: {e}")
             traceback.print_exc()
 
     return metrics_dir  # sentinel for downstream ordering
