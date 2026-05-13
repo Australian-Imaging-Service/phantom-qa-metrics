@@ -518,7 +518,7 @@ def run_pipeline(
     # Remove staging-only DWI directories (contain only tmp/, no final outputs).
     # These are created by convert_all_candidates for candidate series that were
     # not selected as the main DWI output (e.g. RPE pair b=0 volumes).
-    if run_stage1_flag and not cfg.get("nocleanup"):
+    if run_stage1_flag and not nocleanup:
         _t1_markers = {"T1_in_DWI_space.nii.gz", "T1.nii.gz"}
         for d in sorted(output_path.iterdir()):
             if not d.is_dir():

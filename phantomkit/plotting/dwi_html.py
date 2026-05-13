@@ -166,10 +166,17 @@ def _dual_viewer_panels(
         f'{v["name"]}</button>'
         for i, v in enumerate(vials_data)
     )
+    _toggle_all_btn = (
+        '<button id="pk-toggle-all-btn" onclick="pkToggleAllVials()" '
+        'style="padding:4px 12px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text2);font-size:11px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Hide All</button>'
+    ) if vials_data else ""
     chips_html = (
         '<p style="font-size:11px;color:var(--text2);margin-top:10px;margin-bottom:6px;">'
         'Toggle vial ROIs (synced)</p>'
-        f'<div style="display:flex;flex-wrap:wrap;gap:6px;">{chips}</div>'
+        f'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">'
+        f'{_toggle_all_btn}{chips}</div>'
         if vials_data else ""
     )
 
@@ -300,6 +307,21 @@ function pkToggleRadConvention(btn) {{
   btn.textContent = isRad ? "Neurological" : "Radiological";
   for (var nv of [window._pkNvRaw, window._pkNvProc]) {{
     if (nv) nv.setRadiologicalConvention(!isRad);
+  }}
+}}
+
+function pkToggleAllVials() {{
+  var btns = Array.from(document.querySelectorAll('[id^="pk-chip-"]'));
+  if (!btns.length) return;
+  var anyActive = btns.some(function(b) {{ return b.dataset.active === "1"; }});
+  btns.forEach(function(b) {{
+    var isActive = b.dataset.active === "1";
+    if (anyActive ? isActive : !isActive) b.click();
+  }});
+  var toggleBtn = document.getElementById("pk-toggle-all-btn");
+  if (toggleBtn) {{
+    var nowAny = btns.some(function(b) {{ return b.dataset.active === "1"; }});
+    toggleBtn.textContent = nowAny ? "Hide All" : "Show All";
   }}
 }}
 """
