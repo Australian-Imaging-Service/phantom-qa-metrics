@@ -57,6 +57,7 @@ package's location (``phantomkit/`` directory → ``../template_data/``).
 """
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -705,6 +706,10 @@ def main():
 
     validate_inputs(args)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    n_threads = os.cpu_count() or 1
+    os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", str(n_threads))
+
     input_dir = _wrap_flat_inputs(input_dir, output_dir)
 
     dwi_cfg = {
