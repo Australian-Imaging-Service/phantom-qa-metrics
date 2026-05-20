@@ -541,7 +541,10 @@ def _extract_dwi_stats(
     return means, stds, n_vols, list(means.keys())
 
 
-def _compute_snr_cnr(means, stds, vial_names, n_vols) -> tuple:
+_RAYLEIGH_CORRECTION_FACTOR = 0.655  # sqrt((4-π)/2); corrects SNR for Rayleigh noise distribution in magnitude MRI
+
+
+def _compute_snr_cnr(means, stds, vial_names, n_vols, rayleigh_correction: bool = False) -> tuple:
     """Compute SNR and CNR from extracted per-vial per-volume stats.
 
     Returns (snr_dict, cnr_dict) where:
@@ -561,8 +564,12 @@ def _compute_snr_cnr(means, stds, vial_names, n_vols) -> tuple:
         v = a / b
         return None if (math.isnan(v) or math.isinf(v)) else v
 
+    correction = _RAYLEIGH_CORRECTION_FACTOR if rayleigh_correction else 1.0
     snr: Dict[str, List] = {
-        vn: [_safe_div(means[vn][k], noise_std_list[k]) for k in range(n_vols)]
+        vn: [
+            v * correction if (v := _safe_div(means[vn][k], noise_std_list[k])) is not None else None
+            for k in range(n_vols)
+        ]
         for vn in vial_names
     }
 
@@ -599,6 +606,7 @@ def _process_t1t2_snrcnr_html(
     session_name: str,
     filename_prefix: str,
     plots_dir: Path,
+    rayleigh_correction: bool = False,
 ) -> None:
     """Load per-contrast metrics, compute SNR/CNR, build T1T2_SNRCNR.html."""
     import math
@@ -677,11 +685,15 @@ def _process_t1t2_snrcnr_html(
     valid_labels = [l for l in contrast_labels if l in contrast_means]
 
     # SNR matrix: [n_contrasts][n_vials]
+    correction = _RAYLEIGH_CORRECTION_FACTOR if rayleigh_correction else 1.0
     snr_matrix = []
     for label in valid_labels:
         means = contrast_means[label]
         noise_std = contrast_stds[label].get(noise_name)
-        snr_matrix.append([_safe_div(means.get(vn), noise_std) for vn in vial_names])
+        snr_matrix.append([
+            v * correction if (v := _safe_div(means.get(vn), noise_std)) is not None else None
+            for vn in vial_names
+        ])
 
     # CNR dict: {v1: {v2: [c0, c1, ...]}} upper triangle
     cnr_dict: Dict[str, Dict[str, list]] = {}
@@ -760,6 +772,7 @@ def _process_dwi_html(
     session_name: str,
     filename_prefix: str,
     plots_dir: Path,
+    rayleigh_correction: bool = False,
 ) -> None:
     """Extract per-vial DWI stats, compute SNR/CNR, write xlsx, build DWI.html."""
     from phantomkit.plotting.dwi_html import build_dwi_html
@@ -775,7 +788,7 @@ def _process_dwi_html(
         raise RuntimeError("No vial stats extracted from preprocessed DWI")
 
     print(f"  DWI: {n_vols} volume(s), {len(vial_names)} vials")
-    snr_p, cnr_p, cnr_rows_p = _compute_snr_cnr(means_p, stds_p, vial_names, n_vols)
+    snr_p, cnr_p, cnr_rows_p = _compute_snr_cnr(means_p, stds_p, vial_names, n_vols, rayleigh_correction)
 
     # ── Raw DWI (optional) ────────────────────────────────────────────────────
     raw_mif = dwi_mif.parent / "DWI_raw.mif.gz"
@@ -787,7 +800,7 @@ def _process_dwi_html(
             raw_mif, vial_masks_list, tmp_dir, prefix="raw"
         )
         if means_r:
-            snr_r, cnr_r, cnr_rows_r = _compute_snr_cnr(means_r, stds_r, vial_names, n_vols)
+            snr_r, cnr_r, cnr_rows_r = _compute_snr_cnr(means_r, stds_r, vial_names, n_vols, rayleigh_correction)
         else:
             has_raw = False
 
@@ -855,6 +868,7 @@ def _task_generate_plots(
     metrics_sentinel: str,  # enforces Step 3 → Step 4 ordering; not used in body
     output_format: str = "html",
     filename_prefix: str = "",
+    rayleigh_correction: bool = False,
 ) -> str:
     """Generate per-contrast scatter plots and parametric map plots (IR / TE).
 
@@ -1081,6 +1095,7 @@ def _task_generate_plots(
                 session_name=session_name,
                 filename_prefix=filename_prefix,
                 plots_dir=plots_dir,
+                rayleigh_correction=rayleigh_correction,
             )
         except Exception as e:
             import traceback
@@ -1100,6 +1115,7 @@ def _task_generate_plots(
                 session_name=session_name,
                 filename_prefix=filename_prefix,
                 plots_dir=plots_dir,
+                rayleigh_correction=rayleigh_correction,
             )
         except Exception as e:
             import traceback
@@ -1239,6 +1255,7 @@ def PhantomSessionWf(
     contrast_files: list,
     output_format: str = "html",
     filename_prefix: str = "",
+    rayleigh_correction: bool = False,
 ) -> str:
     """
     End-to-end phantom QC workflow.
@@ -1311,6 +1328,7 @@ def PhantomSessionWf(
             metrics_sentinel=metrics.sentinel,
             output_format=output_format,
             filename_prefix=filename_prefix,
+            rayleigh_correction=rayleigh_correction,
         ),
         name="generate_plots",
     )
@@ -1372,11 +1390,13 @@ class PhantomProcessor:
         output_base_dir: str,
         output_format: str = "html",
         filename_prefix: str = "",
+        rayleigh_correction: bool = False,
     ):
         self.template_dir = Path(template_dir)
         self.output_base_dir = Path(output_base_dir)
         self.output_format = output_format
         self.filename_prefix = filename_prefix
+        self.rayleigh_correction = rayleigh_correction
 
         # Phantom name is the last component of template_dir (e.g. "SPIRIT")
         self.phantom_name = self.template_dir.name
@@ -1462,6 +1482,7 @@ class PhantomProcessor:
             contrast_files=contrast_files,
             output_format=self.output_format,
             filename_prefix=self.filename_prefix,
+            rayleigh_correction=self.rayleigh_correction,
         )
         cache_dir = output_dir / ".pydra_cache"
         if cache_dir.exists():
