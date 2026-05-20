@@ -597,6 +597,99 @@ def _compute_snr_cnr(means, stds, vial_names, n_vols, rayleigh_correction: bool 
     return snr, cnr_dict, cnr_rows
 
 
+def _compute_diff_snr(
+    dwi_mif: Path,
+    vial_masks_list: List[Path],
+    tmp_dir: Path,
+    prefix: str = "",
+) -> Optional[Dict[str, Optional[float]]]:
+    """Difference-based SNR from two b0 volumes.
+
+    Method:
+      1. Extract the first two b0 volumes (dwiextract -bzero).
+      2. Per vial ROI: signal S = (mean(vol0) + mean(vol1)) / 2.
+      3. Compute difference image: diff = vol0 - vol1.
+      4. Noise = std(diff within ROI).
+      5. SNR = S * sqrt(2) / noise  [the sqrt(2) corrects for variance doubling
+         caused by the subtraction: Var(A-B) = 2*Var when A,B are i.i.d.].
+
+    Returns None if fewer than 2 b0 volumes are available.
+    """
+    import math
+
+    pfx = f"{prefix}_" if prefix else ""
+
+    b0_all = str(tmp_dir / f"{pfx}diff_b0_all.nii.gz")
+    res = subprocess.run(
+        ["dwiextract", "-bzero", str(dwi_mif), b0_all, "-force"],
+        capture_output=True, text=True,
+    )
+    if res.returncode != 0:
+        print(f"    ⚠ diff SNR: b0 extraction failed: {res.stderr.strip()}")
+        return None
+
+    res = subprocess.run(["mrinfo", "-size", b0_all], capture_output=True, text=True)
+    size_parts = res.stdout.strip().split()
+    n_b0 = int(size_parts[3]) if len(size_parts) >= 4 else 1
+    if n_b0 < 2:
+        print(f"    ⚠ diff SNR: need ≥ 2 b0 volumes, found {n_b0}")
+        return None
+
+    b0_v0   = str(tmp_dir / f"{pfx}diff_b0_v0.nii.gz")
+    b0_v1   = str(tmp_dir / f"{pfx}diff_b0_v1.nii.gz")
+    b0_diff = str(tmp_dir / f"{pfx}diff_b0_sub.nii.gz")
+    for cmd in [
+        ["mrconvert", b0_all, "-coord", "3", "0", b0_v0, "-quiet", "-force"],
+        ["mrconvert", b0_all, "-coord", "3", "1", b0_v1, "-quiet", "-force"],
+        ["mrcalc",    b0_v0, b0_v1, "-subtract", b0_diff, "-force"],
+    ]:
+        if subprocess.run(cmd, capture_output=True).returncode != 0:
+            print(f"    ⚠ diff SNR: command failed: {' '.join(cmd[:3])}")
+            return None
+
+    snr_dict: Dict[str, Optional[float]] = {}
+    for vial_mask in sorted(vial_masks_list):
+        vial_name = (
+            Path(vial_mask).name.replace(".nii.gz", "").replace(".nii", "").split(".")[0]
+        )
+        regridded = str(tmp_dir / f"{pfx}diff_mask_{vial_name}.nii")
+        rg = subprocess.run(
+            ["mrgrid", "-template", b0_v0, str(vial_mask), "regrid",
+             regridded, "-interp", "nearest", "-datatype", "bit", "-force"],
+            capture_output=True, text=True,
+        )
+        if rg.returncode != 0:
+            snr_dict[vial_name] = None
+            continue
+
+        res0 = subprocess.run(
+            ["mrstats", "-quiet", b0_v0,   "-output", "mean", "-mask", regridded],
+            capture_output=True, text=True,
+        )
+        res1 = subprocess.run(
+            ["mrstats", "-quiet", b0_v1,   "-output", "mean", "-mask", regridded],
+            capture_output=True, text=True,
+        )
+        resd = subprocess.run(
+            ["mrstats", "-quiet", b0_diff, "-output", "std",  "-mask", regridded],
+            capture_output=True, text=True,
+        )
+        try:
+            mean0     = float(res0.stdout.strip())
+            mean1     = float(res1.stdout.strip())
+            noise_std = float(resd.stdout.strip())
+            signal    = (mean0 + mean1) / 2.0
+            if noise_std == 0:
+                snr_dict[vial_name] = None
+            else:
+                snr = signal * math.sqrt(2) / noise_std
+                snr_dict[vial_name] = None if (math.isnan(snr) or math.isinf(snr)) else snr
+        except (ValueError, AttributeError):
+            snr_dict[vial_name] = None
+
+    return snr_dict
+
+
 def _process_t1t2_snrcnr_html(
     *,
     te_files: List[Path],
@@ -790,10 +883,13 @@ def _process_dwi_html(
     print(f"  DWI: {n_vols} volume(s), {len(vial_names)} vials")
     snr_p, cnr_p, cnr_rows_p = _compute_snr_cnr(means_p, stds_p, vial_names, n_vols, rayleigh_correction)
 
+    print(f"  DWI: computing difference-based SNR (preprocessed)...")
+    diff_snr_p = _compute_diff_snr(dwi_mif, vial_masks_list, tmp_dir, prefix="proc")
+
     # ── Raw DWI (optional) ────────────────────────────────────────────────────
     raw_mif = dwi_mif.parent / "DWI_raw.mif.gz"
     has_raw = raw_mif.exists()
-    means_r = stds_r = snr_r = cnr_r = cnr_rows_r = None
+    means_r = stds_r = snr_r = cnr_r = cnr_rows_r = diff_snr_r = None
     if has_raw:
         print(f"  DWI: extracting stats from raw...")
         means_r, stds_r, _, _ = _extract_dwi_stats(
@@ -801,6 +897,8 @@ def _process_dwi_html(
         )
         if means_r:
             snr_r, cnr_r, cnr_rows_r = _compute_snr_cnr(means_r, stds_r, vial_names, n_vols, rayleigh_correction)
+            print(f"  DWI: computing difference-based SNR (raw)...")
+            diff_snr_r = _compute_diff_snr(raw_mif, vial_masks_list, tmp_dir, prefix="raw")
         else:
             has_raw = False
 
@@ -814,13 +912,17 @@ def _process_dwi_html(
 
     _sheets["mean_proc"]  = _make_rows(means_p, "mean_proc")
     _sheets["std_proc"]   = _make_rows(stds_p,  "std_proc")
-    _sheets["SNR_proc"]   = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_p[vn])}} for vn in vial_names]
-    _sheets["CNR_proc"]   = cnr_rows_p
+    _sheets["SNR_proc"]      = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_p[vn])}} for vn in vial_names]
+    _sheets["CNR_proc"]      = cnr_rows_p
+    if diff_snr_p:
+        _sheets["SNR_diff_proc"] = [{"vial": vn, "snr": diff_snr_p.get(vn)} for vn in vial_names]
     if has_raw:
-        _sheets["mean_raw"] = _make_rows(means_r, "mean_raw")
-        _sheets["std_raw"]  = _make_rows(stds_r,  "std_raw")
-        _sheets["SNR_raw"]  = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_r[vn])}} for vn in vial_names]
-        _sheets["CNR_raw"]  = cnr_rows_r
+        _sheets["mean_raw"]      = _make_rows(means_r, "mean_raw")
+        _sheets["std_raw"]       = _make_rows(stds_r,  "std_raw")
+        _sheets["SNR_raw"]       = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_r[vn])}} for vn in vial_names]
+        _sheets["CNR_raw"]       = cnr_rows_r
+        if diff_snr_r:
+            _sheets["SNR_diff_raw"] = [{"vial": vn, "snr": diff_snr_r.get(vn)} for vn in vial_names]
 
     with pd.ExcelWriter(xlsx_file, engine="openpyxl") as writer:
         for sheet_name, rows in _sheets.items():
@@ -843,6 +945,9 @@ def _process_dwi_html(
     _dwi_name = f"{filename_prefix}_DWI" if filename_prefix else "DWI"
     output_html = str(plots_dir / f"{_dwi_name}.html")
 
+    def _diff_snr_list(d):
+        return [d.get(vn) for vn in vial_names] if d else None
+
     build_dwi_html(
         meanb0_nii=meanb0_proc,
         vial_niftis=vial_niftis_map,
@@ -853,6 +958,8 @@ def _process_dwi_html(
         raw_meanb0_nii=meanb0_raw,
         raw_snr_data={"vials": vial_names, "n_vols": n_vols, "snr": _snr_matrix(snr_r)} if has_raw else None,
         raw_cnr_data={"vials": vial_names, "n_vols": n_vols, "cnr": cnr_r} if has_raw else None,
+        diff_snr_data={"vials": vial_names, "snr": _diff_snr_list(diff_snr_p)} if diff_snr_p else None,
+        raw_diff_snr_data={"vials": vial_names, "snr": _diff_snr_list(diff_snr_r)} if diff_snr_r else None,
     )
     print(f"    ✓ Generated DWI HTML: {Path(output_html).name}")
 

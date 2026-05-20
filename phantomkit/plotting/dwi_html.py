@@ -343,6 +343,8 @@ def build_dwi_html(
     raw_meanb0_nii: str | None = None,
     raw_snr_data: dict | None = None,
     raw_cnr_data: dict | None = None,
+    diff_snr_data: dict | None = None,
+    raw_diff_snr_data: dict | None = None,
 ) -> str:
     """Build a self-contained interactive HTML page for DWI QA.
 
@@ -360,6 +362,9 @@ def build_dwi_html(
         Path to write the HTML.
     raw_meanb0_nii / raw_snr_data / raw_cnr_data:
         Optional raw DWI equivalents — triggers two-column layout when provided.
+    diff_snr_data / raw_diff_snr_data:
+        Optional difference-based SNR dicts — ``{"vials": [...], "snr": [...]}``.
+        snr is a flat list (one value per vial, not per volume).
     """
     from phantomkit.plotting._html_common import (
         html_head,
@@ -402,6 +407,10 @@ def build_dwi_html(
     snr_raw  = raw_snr_data["snr"]  if raw_snr_data else None
     cnr_raw  = raw_cnr_data["cnr"]  if raw_cnr_data else None
 
+    diff_snr_proc: list | None = diff_snr_data["snr"] if diff_snr_data else None
+    diff_snr_raw:  list | None = raw_diff_snr_data["snr"] if raw_diff_snr_data else None
+    has_diff_snr = diff_snr_proc is not None
+
     # ── Selectors ─────────────────────────────────────────────────────────────
     vol_selector_html = _vol_selector_html(n_vols)
     cnr_selector_html = _cnr_vial_selector_html(snr_vials)
@@ -423,12 +432,40 @@ def build_dwi_html(
     else:
         snr_ymin, snr_ymax = 0.0, 10.0
 
-    snr_section_label = '<div class="chart-title">Signal-to-Noise Ratio (SNR)</div>'
-    cnr_section_label = '<div class="chart-title">Contrast-to-Noise Ratio (CNR)</div>'
+    snr_section_label      = '<div class="chart-title">Signal-to-Noise Ratio (SNR) — Noise-vial method</div>'
+    cnr_section_label      = '<div class="chart-title">Contrast-to-Noise Ratio (CNR)</div>'
+    diff_snr_section_label = '<div class="chart-title">Signal-to-Noise Ratio (SNR) — Difference method</div>'
+
+    # ── Diff SNR global y-range ───────────────────────────────────────────────
+    if has_diff_snr:
+        all_diff_vals = [v for v in (diff_snr_proc or []) if v is not None]
+        if diff_snr_raw:
+            all_diff_vals += [v for v in diff_snr_raw if v is not None]
+        if all_diff_vals:
+            diff_ymin = min(all_diff_vals)
+            diff_ymax = max(all_diff_vals)
+            diff_pad  = (diff_ymax - diff_ymin) * 0.1 or 1.0
+            diff_ymin = max(0.0, diff_ymin - diff_pad)
+            diff_ymax = diff_ymax + diff_pad
+        else:
+            diff_ymin, diff_ymax = 0.0, 10.0
 
     # ── Chart HTML ────────────────────────────────────────────────────────────
-    snr_charts_html = '<div class="chart-wrap" style="height:320px"><canvas id="snrChart"></canvas></div>'
-    cnr_charts_html = '<div class="chart-wrap" style="height:320px"><canvas id="cnrChart"></canvas></div>'
+    snr_charts_html      = '<div class="chart-wrap" style="height:320px"><canvas id="snrChart"></canvas></div>'
+    cnr_charts_html      = '<div class="chart-wrap" style="height:320px"><canvas id="cnrChart"></canvas></div>'
+    diff_snr_charts_html = '<div class="chart-wrap" style="height:320px"><canvas id="diffSnrChart"></canvas></div>'
+
+    diff_snr_card_html = f"""
+<div class="chart-card" style="margin-bottom:20px;">
+  {diff_snr_section_label}
+  <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
+    S&thinsp;=&thinsp;mean of two b0 volumes within ROI &middot;
+    noise&thinsp;&sigma;&thinsp;=&thinsp;std(b0&#8320;&thinsp;&minus;&thinsp;b0&#8321;) within ROI &middot;
+    SNR&thinsp;=&thinsp;S&thinsp;&times;&thinsp;&radic;2&thinsp;/&thinsp;noise&thinsp;&sigma;
+    &nbsp;(1/&radic;2 corrects for variance doubling from subtraction){"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed &thinsp;&middot;&thinsp;click legend to toggle" if (two_col and diff_snr_raw is not None) else ""}
+  </p>
+  {diff_snr_charts_html}
+</div>""" if has_diff_snr else ""
 
     html = f"""{head}
 <body>
@@ -449,6 +486,8 @@ def build_dwi_html(
   {snr_charts_html}
 </div>
 
+{diff_snr_card_html}
+
 <div class="chart-card" style="margin-bottom:20px;">
   {cnr_section_label}
   <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
@@ -459,16 +498,20 @@ def build_dwi_html(
 </div>
 
 <script>
-const SNR_PROC   = {json.dumps(snr_proc)};
-const SNR_RAW    = {json.dumps(snr_raw)};
-const CNR_PROC   = {json.dumps(cnr_proc)};
-const CNR_RAW    = {json.dumps(cnr_raw)};
-const SNR_VIALS  = {json.dumps(snr_vials)};
-const N_VOLS     = {json.dumps(n_vols)};
-const SNR_YMIN   = {snr_ymin:.6g};
-const SNR_YMAX   = {snr_ymax:.6g};
-const COLOR_RAW  = "#378ADD";
-const COLOR_PROC = "#27AE60";
+const SNR_PROC        = {json.dumps(snr_proc)};
+const SNR_RAW         = {json.dumps(snr_raw)};
+const CNR_PROC        = {json.dumps(cnr_proc)};
+const CNR_RAW         = {json.dumps(cnr_raw)};
+const SNR_VIALS       = {json.dumps(snr_vials)};
+const N_VOLS          = {json.dumps(n_vols)};
+const SNR_YMIN        = {snr_ymin:.6g};
+const SNR_YMAX        = {snr_ymax:.6g};
+const DIFF_SNR_PROC   = {json.dumps(diff_snr_proc)};
+const DIFF_SNR_RAW    = {json.dumps(diff_snr_raw)};
+const DIFF_SNR_YMIN   = {f"{diff_ymin:.6g}" if has_diff_snr else "0.0"};
+const DIFF_SNR_YMAX   = {f"{diff_ymax:.6g}" if has_diff_snr else "10.0"};
+const COLOR_RAW       = "#378ADD";
+const COLOR_PROC      = "#27AE60";
 
 {opts_js}
 {ERROR_BAR_PLUGIN_JS}
@@ -526,6 +569,46 @@ function pkSetSnrVol(el) {{
   document.querySelectorAll(".snr-vol-btn").forEach(function(b) {{ b.classList.remove("active"); }});
   if (el.tagName !== "SELECT") el.classList.add("active");
 }}
+
+// ── Difference-based SNR chart ────────────────────────────────────────────
+function _diffSnrDatasets() {{
+  var datasets = [];
+  if (DIFF_SNR_RAW) {{
+    datasets.push({{
+      label: "Raw DWI",
+      data: SNR_VIALS.map(function(v, j) {{ return {{x: j, y: DIFF_SNR_RAW[j] != null ? DIFF_SNR_RAW[j] : null}}; }}),
+      borderColor: COLOR_RAW, backgroundColor: COLOR_RAW + "44",
+      pointBackgroundColor: COLOR_RAW, pointRadius: 6, pointHoverRadius: 8,
+      showLine: false, borderWidth: 0,
+    }});
+  }}
+  if (DIFF_SNR_PROC) {{
+    datasets.push({{
+      label: "Preprocessed",
+      data: SNR_VIALS.map(function(v, j) {{ return {{x: j, y: DIFF_SNR_PROC[j] != null ? DIFF_SNR_PROC[j] : null}}; }}),
+      borderColor: COLOR_PROC, backgroundColor: COLOR_PROC + "44",
+      pointBackgroundColor: COLOR_PROC, pointRadius: 6, pointHoverRadius: 8,
+      showLine: false, borderWidth: 0,
+    }});
+  }}
+  return datasets;
+}}
+
+(function() {{
+  var el = document.getElementById("diffSnrChart");
+  if (!el) return;
+  var opts = baseOpts("Vial", "SNR (diff)");
+  opts.scales.x.type = "linear";
+  opts.scales.x.ticks.callback = function(v) {{ return SNR_VIALS[v] != null ? SNR_VIALS[v] : v; }};
+  opts.scales.x.ticks.stepSize = 1;
+  opts.scales.y.min = DIFF_SNR_YMIN;
+  opts.scales.y.max = DIFF_SNR_YMAX;
+  opts.plugins.tooltip.callbacks.label = function(ctx) {{ return ctx.dataset.label + "  SNR: " + ctx.parsed.y.toFixed(2); }};
+  opts.plugins.legend.display = DIFF_SNR_RAW !== null;
+  opts.plugins.legend.onClick = Chart.defaults.plugins.legend.onClick;
+  opts.plugins.legend.labels = {{ color: "#888780", font: {{ size: 12 }}, usePointStyle: true, pointStyle: "circle" }};
+  new Chart(el.getContext("2d"), {{type: "scatter", data: {{datasets: _diffSnrDatasets()}}, options: opts}});
+}})();
 
 // ── CNR chart ─────────────────────────────────────────────────────────────
 var _cnrVial1 = SNR_VIALS[0] || null;
