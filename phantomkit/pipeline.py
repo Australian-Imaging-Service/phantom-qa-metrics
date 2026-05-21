@@ -397,6 +397,7 @@ def run_stage2(
             template_dir=str(template_dir),
             output_base_dir=str(output_dir),
             filename_prefix=input_identifier,
+            n_threads=n_threads,
         )
         processor.process_session(str(t1_in_dwi))
         print()
@@ -554,6 +555,7 @@ def run_stage3(
         template_dir=str(template_dir),
         output_base_dir=str(output_dir),
         filename_prefix=input_identifier,
+        n_threads=n_threads,
     )
     processor.process_session(str(t1_nii_path))
 

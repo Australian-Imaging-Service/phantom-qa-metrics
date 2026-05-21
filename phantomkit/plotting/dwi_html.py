@@ -33,6 +33,50 @@ def _vol_selector_html(n_vols: int) -> str:
     )
 
 
+def _b0_pair_selector_html(n_b0: int) -> str:
+    """Two-row b0 volume selector for the difference-SNR panel.
+
+    Uses buttons (≤ 10 b0s) or <select> dropdowns (> 10 b0s), mirroring the
+    CNR vial selector pattern.  data-which=1 → b0 A, data-which=2 → b0 B.
+    """
+    indices = list(range(n_b0))
+    if n_b0 <= 10:
+        def _row(cls: str, which: int, active_idx: int) -> str:
+            return "".join(
+                f'<button class="pk-btn {cls}{" active" if i == active_idx else ""}" '
+                f'data-which="{which}" data-b0="{i}" '
+                f'onclick="pkSetDiffB0(this)">b0 {i}</button>'
+                for i in indices
+            )
+        row_a = _row("diff-b0a-btn", 1, 0)
+        row_b = _row("diff-b0b-btn", 2, 1)
+    else:
+        def _select(cls: str, which: int, active_idx: int) -> str:
+            opts = "".join(
+                f'<option value="{i}"{" selected" if i == active_idx else ""}>b0 {i}</option>'
+                for i in indices
+            )
+            return (
+                f'<select class="{cls}" data-which="{which}" '
+                f'onchange="pkSetDiffB0(this)" '
+                f'style="padding:4px 8px;border:1px solid var(--border);border-radius:4px;'
+                f'background:var(--bg2);color:var(--text);font-size:12px;">{opts}</select>'
+            )
+        row_a = _select("diff-b0a-btn", 1, 0)
+        row_b = _select("diff-b0b-btn", 2, 1)
+
+    return (
+        '<div style="margin-bottom:10px;">'
+        '<div style="margin-bottom:6px;">'
+        '<span class="pk-ctrl-label" style="margin-right:6px;">b0 A</span>'
+        f'<span style="display:inline-flex;flex-wrap:wrap;gap:4px;">{row_a}</span>'
+        '</div><div>'
+        '<span class="pk-ctrl-label" style="margin-right:6px;">b0 B</span>'
+        f'<span style="display:inline-flex;flex-wrap:wrap;gap:4px;">{row_b}</span>'
+        '</div></div>'
+    )
+
+
 def _cnr_vial_selector_html(vials: list[str]) -> str:
     """Two rows of vial-selector buttons for CNR plot.
 
@@ -407,9 +451,10 @@ def build_dwi_html(
     snr_raw  = raw_snr_data["snr"]  if raw_snr_data else None
     cnr_raw  = raw_cnr_data["cnr"]  if raw_cnr_data else None
 
-    diff_snr_proc: list | None = diff_snr_data["snr"] if diff_snr_data else None
-    diff_snr_raw:  list | None = raw_diff_snr_data["snr"] if raw_diff_snr_data else None
-    has_diff_snr = diff_snr_proc is not None
+    has_diff_snr  = diff_snr_data is not None
+    diff_n_b0     = diff_snr_data["n_b0"]    if has_diff_snr else 0
+    diff_pairs_p  = diff_snr_data["pairs"]   if has_diff_snr else {}
+    diff_pairs_r  = raw_diff_snr_data["pairs"] if raw_diff_snr_data else None
 
     # ── Selectors ─────────────────────────────────────────────────────────────
     vol_selector_html = _vol_selector_html(n_vols)
@@ -436,11 +481,11 @@ def build_dwi_html(
     cnr_section_label      = '<div class="chart-title">Contrast-to-Noise Ratio (CNR)</div>'
     diff_snr_section_label = '<div class="chart-title">Signal-to-Noise Ratio (SNR) — Difference method</div>'
 
-    # ── Diff SNR global y-range ───────────────────────────────────────────────
+    # ── Diff SNR global y-range (across all pairs and both proc/raw) ─────────
     if has_diff_snr:
-        all_diff_vals = [v for v in (diff_snr_proc or []) if v is not None]
-        if diff_snr_raw:
-            all_diff_vals += [v for v in diff_snr_raw if v is not None]
+        all_diff_vals = [v for vals in diff_pairs_p.values() for v in vals if v is not None]
+        if diff_pairs_r:
+            all_diff_vals += [v for vals in diff_pairs_r.values() for v in vals if v is not None]
         if all_diff_vals:
             diff_ymin = min(all_diff_vals)
             diff_ymax = max(all_diff_vals)
@@ -455,17 +500,23 @@ def build_dwi_html(
     cnr_charts_html      = '<div class="chart-wrap" style="height:320px"><canvas id="cnrChart"></canvas></div>'
     diff_snr_charts_html = '<div class="chart-wrap" style="height:320px"><canvas id="diffSnrChart"></canvas></div>'
 
-    diff_snr_card_html = f"""
+    if has_diff_snr:
+        b0_selector_html   = _b0_pair_selector_html(diff_n_b0)
+        _has_raw_diff      = diff_pairs_r is not None
+        diff_snr_card_html = f"""
 <div class="chart-card" style="margin-bottom:20px;">
   {diff_snr_section_label}
   <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
     S&thinsp;=&thinsp;mean of two b0 volumes within ROI &middot;
     noise&thinsp;&sigma;&thinsp;=&thinsp;std(b0&#8320;&thinsp;&minus;&thinsp;b0&#8321;) within ROI &middot;
     SNR&thinsp;=&thinsp;S&thinsp;&times;&thinsp;&radic;2&thinsp;/&thinsp;noise&thinsp;&sigma;
-    &nbsp;(1/&radic;2 corrects for variance doubling from subtraction){"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed &thinsp;&middot;&thinsp;click legend to toggle" if (two_col and diff_snr_raw is not None) else ""}
+    &nbsp;(1/&radic;2 corrects for variance doubling from subtraction){"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed" if _has_raw_diff else ""}
   </p>
+  {b0_selector_html}
   {diff_snr_charts_html}
-</div>""" if has_diff_snr else ""
+</div>"""
+    else:
+        diff_snr_card_html = ""
 
     html = f"""{head}
 <body>
@@ -477,7 +528,7 @@ def build_dwi_html(
 <div class="chart-card" style="margin-bottom:20px;">
   {snr_section_label}
   <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
-    SNR&thinsp;=&thinsp;vial mean / noise&thinsp;&sigma; &middot; noise estimated from Noise ROI &middot; y-axis range fixed across all volumes{"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed &thinsp;&middot;&thinsp;click legend to toggle" if two_col else ""}
+    SNR&thinsp;=&thinsp;vial mean / noise&thinsp;&sigma; &middot; noise estimated from Noise ROI &middot; y-axis range fixed across all volumes{"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed" if two_col else ""}
   </p>
   <div style="margin-bottom:12px;">
     <span class="pk-ctrl-label" style="margin-right:6px;">Volume</span>
@@ -491,7 +542,7 @@ def build_dwi_html(
 <div class="chart-card" style="margin-bottom:20px;">
   {cnr_section_label}
   <p style="font-size:12px;color:var(--text2);margin:0 0 10px;">
-    CNR&thinsp;=&thinsp;|mean(vial 1)&thinsp;&minus;&thinsp;mean(vial 2)|&thinsp;/&thinsp;noise&thinsp;&sigma; &middot; across all DWI volumes{"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed &thinsp;&middot;&thinsp;click legend to toggle" if two_col else ""}
+    CNR&thinsp;=&thinsp;|mean(vial 1)&thinsp;&minus;&thinsp;mean(vial 2)|&thinsp;/&thinsp;noise&thinsp;&sigma; &middot; across all DWI volumes{"&thinsp;&middot;&thinsp;<span style='color:#378ADD;font-weight:600;'>&#9679;</span> Raw DWI &thinsp;<span style='color:#27AE60;font-weight:600;'>&#9679;</span> Preprocessed" if two_col else ""}
   </p>
   {cnr_selector_html}
   {cnr_charts_html}
@@ -506,10 +557,11 @@ const SNR_VIALS       = {json.dumps(snr_vials)};
 const N_VOLS          = {json.dumps(n_vols)};
 const SNR_YMIN        = {snr_ymin:.6g};
 const SNR_YMAX        = {snr_ymax:.6g};
-const DIFF_SNR_PROC   = {json.dumps(diff_snr_proc)};
-const DIFF_SNR_RAW    = {json.dumps(diff_snr_raw)};
-const DIFF_SNR_YMIN   = {f"{diff_ymin:.6g}" if has_diff_snr else "0.0"};
-const DIFF_SNR_YMAX   = {f"{diff_ymax:.6g}" if has_diff_snr else "10.0"};
+const DIFF_SNR_PAIRS_PROC = {json.dumps(diff_pairs_p)};
+const DIFF_SNR_PAIRS_RAW  = {json.dumps(diff_pairs_r)};
+const DIFF_SNR_N_B0       = {diff_n_b0};
+const DIFF_SNR_YMIN       = {f"{diff_ymin:.6g}" if has_diff_snr else "0.0"};
+const DIFF_SNR_YMAX       = {f"{diff_ymax:.6g}" if has_diff_snr else "10.0"};
 const COLOR_RAW       = "#378ADD";
 const COLOR_PROC      = "#27AE60";
 
@@ -571,26 +623,35 @@ function pkSetSnrVol(el) {{
 }}
 
 // ── Difference-based SNR chart ────────────────────────────────────────────
-function _diffSnrDatasets() {{
+var _diffB0A = 0;
+var _diffB0B = 1;
+var _diffSnrChart = null;
+
+function _diffPairKey(a, b) {{
+  return Math.min(a, b) + "_" + Math.max(a, b);
+}}
+
+function _diffSnrDatasets(a, b) {{
+  var key = _diffPairKey(a, b);
   var datasets = [];
-  if (DIFF_SNR_RAW) {{
+  if (DIFF_SNR_PAIRS_RAW) {{
+    var rawVals = DIFF_SNR_PAIRS_RAW[key] || [];
     datasets.push({{
       label: "Raw DWI",
-      data: SNR_VIALS.map(function(v, j) {{ return {{x: j, y: DIFF_SNR_RAW[j] != null ? DIFF_SNR_RAW[j] : null}}; }}),
+      data: SNR_VIALS.map(function(v, j) {{ return {{x: j, y: rawVals[j] != null ? rawVals[j] : null}}; }}),
       borderColor: COLOR_RAW, backgroundColor: COLOR_RAW + "44",
       pointBackgroundColor: COLOR_RAW, pointRadius: 6, pointHoverRadius: 8,
       showLine: false, borderWidth: 0,
     }});
   }}
-  if (DIFF_SNR_PROC) {{
-    datasets.push({{
-      label: "Preprocessed",
-      data: SNR_VIALS.map(function(v, j) {{ return {{x: j, y: DIFF_SNR_PROC[j] != null ? DIFF_SNR_PROC[j] : null}}; }}),
-      borderColor: COLOR_PROC, backgroundColor: COLOR_PROC + "44",
-      pointBackgroundColor: COLOR_PROC, pointRadius: 6, pointHoverRadius: 8,
-      showLine: false, borderWidth: 0,
-    }});
-  }}
+  var procVals = DIFF_SNR_PAIRS_PROC[key] || [];
+  datasets.push({{
+    label: "Preprocessed",
+    data: SNR_VIALS.map(function(v, j) {{ return {{x: j, y: procVals[j] != null ? procVals[j] : null}}; }}),
+    borderColor: COLOR_PROC, backgroundColor: COLOR_PROC + "44",
+    pointBackgroundColor: COLOR_PROC, pointRadius: 6, pointHoverRadius: 8,
+    showLine: false, borderWidth: 0,
+  }});
   return datasets;
 }}
 
@@ -604,11 +665,30 @@ function _diffSnrDatasets() {{
   opts.scales.y.min = DIFF_SNR_YMIN;
   opts.scales.y.max = DIFF_SNR_YMAX;
   opts.plugins.tooltip.callbacks.label = function(ctx) {{ return ctx.dataset.label + "  SNR: " + ctx.parsed.y.toFixed(2); }};
-  opts.plugins.legend.display = DIFF_SNR_RAW !== null;
+  opts.plugins.legend.display = DIFF_SNR_PAIRS_RAW !== null;
   opts.plugins.legend.onClick = Chart.defaults.plugins.legend.onClick;
   opts.plugins.legend.labels = {{ color: "#888780", font: {{ size: 12 }}, usePointStyle: true, pointStyle: "circle" }};
-  new Chart(el.getContext("2d"), {{type: "scatter", data: {{datasets: _diffSnrDatasets()}}, options: opts}});
+  _diffSnrChart = new Chart(el.getContext("2d"), {{type: "scatter", data: {{datasets: _diffSnrDatasets(0, 1)}}, options: opts}});
 }})();
+
+function pkSetDiffB0(el) {{
+  var which = parseInt(el.dataset.which !== undefined ? el.dataset.which : el.getAttribute("data-which"));
+  var idx   = parseInt(el.tagName === "SELECT" ? el.value : el.dataset.b0);
+  if (which === 1) {{
+    _diffB0A = idx;
+    document.querySelectorAll(".diff-b0a-btn").forEach(function(b) {{ b.classList.remove("active"); }});
+  }} else {{
+    _diffB0B = idx;
+    document.querySelectorAll(".diff-b0b-btn").forEach(function(b) {{ b.classList.remove("active"); }});
+  }}
+  if (el.tagName !== "SELECT") el.classList.add("active");
+  if (_diffSnrChart) {{
+    var hidden = _diffSnrChart.data.datasets.map(function(_, i) {{ return _diffSnrChart.getDatasetMeta(i).hidden; }});
+    _diffSnrChart.data.datasets = _diffSnrDatasets(_diffB0A, _diffB0B);
+    hidden.forEach(function(h, i) {{ if (_diffSnrChart.data.datasets[i]) _diffSnrChart.getDatasetMeta(i).hidden = h; }});
+    _diffSnrChart.update("none");
+  }}
+}}
 
 // ── CNR chart ─────────────────────────────────────────────────────────────
 var _cnrVial1 = SNR_VIALS[0] || null;

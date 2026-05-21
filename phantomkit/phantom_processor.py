@@ -24,6 +24,7 @@ matplotlib.use("Agg")  # non-interactive backend; required when plotting runs
 # in a background thread (e.g. ThreadPoolExecutor on macOS)
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -180,6 +181,7 @@ def _task_register(
     input_image: str,
     template_phantom: str,
     output_prefix: str,
+    cpu_threads: int = 1,
 ) -> tuple[str, str, str]:
     """Run ANTs rigid registration of the input image to the template phantom."""
     cmd = [
@@ -195,7 +197,7 @@ def _task_register(
         "-t",
         "r",
         "-n",
-        "8",
+        str(cpu_threads),
         "-j",
         "1",
     ]
@@ -602,20 +604,25 @@ def _compute_diff_snr(
     vial_masks_list: List[Path],
     tmp_dir: Path,
     prefix: str = "",
-) -> Optional[Dict[str, Optional[float]]]:
-    """Difference-based SNR from two b0 volumes.
+) -> Optional[Dict]:
+    """Difference-based SNR computed for every pair of b0 volumes.
 
-    Method:
-      1. Extract the first two b0 volumes (dwiextract -bzero).
-      2. Per vial ROI: signal S = (mean(vol0) + mean(vol1)) / 2.
-      3. Compute difference image: diff = vol0 - vol1.
-      4. Noise = std(diff within ROI).
-      5. SNR = S * sqrt(2) / noise  [the sqrt(2) corrects for variance doubling
-         caused by the subtraction: Var(A-B) = 2*Var when A,B are i.i.d.].
+    Method (per pair i, j):
+      1. Signal S = (mean(vol_i) + mean(vol_j)) / 2 within vial ROI.
+      2. Noise = std(vol_i - vol_j) within vial ROI.
+      3. SNR = S * sqrt(2) / noise  [sqrt(2) corrects for variance doubling
+         caused by subtraction: Var(A-B) = 2*Var when A,B are i.i.d.].
 
-    Returns None if fewer than 2 b0 volumes are available.
+    All b0 volumes are loaded into numpy once; all pairs are computed in Python
+    to avoid O(n_pairs * n_vials) subprocess calls.
+
+    Returns a dict:
+        {"vials": [...], "n_b0": int, "pairs": {"0_1": [snr_v0, snr_v1, ...], ...}}
+    or None if fewer than 2 b0 volumes are available.
     """
     import math
+    import numpy as np
+    import nibabel as nib
 
     pfx = f"{prefix}_" if prefix else ""
 
@@ -635,59 +642,51 @@ def _compute_diff_snr(
         print(f"    ⚠ diff SNR: need ≥ 2 b0 volumes, found {n_b0}")
         return None
 
-    b0_v0   = str(tmp_dir / f"{pfx}diff_b0_v0.nii.gz")
-    b0_v1   = str(tmp_dir / f"{pfx}diff_b0_v1.nii.gz")
-    b0_diff = str(tmp_dir / f"{pfx}diff_b0_sub.nii.gz")
-    for cmd in [
-        ["mrconvert", b0_all, "-coord", "3", "0", b0_v0, "-quiet", "-force"],
-        ["mrconvert", b0_all, "-coord", "3", "1", b0_v1, "-quiet", "-force"],
-        ["mrcalc",    b0_v0, b0_v1, "-subtract", b0_diff, "-force"],
-    ]:
-        if subprocess.run(cmd, capture_output=True).returncode != 0:
-            print(f"    ⚠ diff SNR: command failed: {' '.join(cmd[:3])}")
-            return None
+    # Load all b0 data in one shot — shape (X, Y, Z, n_b0) or (X, Y, Z) if n_b0==1
+    b0_img  = nib.load(b0_all)
+    b0_data = np.asarray(b0_img.dataobj, dtype=np.float32)
+    if b0_data.ndim == 3:
+        b0_data = b0_data[..., np.newaxis]
 
-    snr_dict: Dict[str, Optional[float]] = {}
+    # Regrid each vial mask to b0 space once, then load into numpy
+    vial_names: List[str] = []
+    vial_masks_np: Dict[str, np.ndarray] = {}
     for vial_mask in sorted(vial_masks_list):
         vial_name = (
             Path(vial_mask).name.replace(".nii.gz", "").replace(".nii", "").split(".")[0]
         )
         regridded = str(tmp_dir / f"{pfx}diff_mask_{vial_name}.nii")
         rg = subprocess.run(
-            ["mrgrid", "-template", b0_v0, str(vial_mask), "regrid",
+            ["mrgrid", "-template", b0_all, str(vial_mask), "regrid",
              regridded, "-interp", "nearest", "-datatype", "bit", "-force"],
             capture_output=True, text=True,
         )
         if rg.returncode != 0:
-            snr_dict[vial_name] = None
             continue
+        vial_names.append(vial_name)
+        vial_masks_np[vial_name] = nib.load(regridded).get_fdata() > 0.5
 
-        res0 = subprocess.run(
-            ["mrstats", "-quiet", b0_v0,   "-output", "mean", "-mask", regridded],
-            capture_output=True, text=True,
-        )
-        res1 = subprocess.run(
-            ["mrstats", "-quiet", b0_v1,   "-output", "mean", "-mask", regridded],
-            capture_output=True, text=True,
-        )
-        resd = subprocess.run(
-            ["mrstats", "-quiet", b0_diff, "-output", "std",  "-mask", regridded],
-            capture_output=True, text=True,
-        )
-        try:
-            mean0     = float(res0.stdout.strip())
-            mean1     = float(res1.stdout.strip())
-            noise_std = float(resd.stdout.strip())
-            signal    = (mean0 + mean1) / 2.0
-            if noise_std == 0:
-                snr_dict[vial_name] = None
-            else:
-                snr = signal * math.sqrt(2) / noise_std
-                snr_dict[vial_name] = None if (math.isnan(snr) or math.isinf(snr)) else snr
-        except (ValueError, AttributeError):
-            snr_dict[vial_name] = None
+    # Compute SNR for every pair (i, j), i < j
+    pairs: Dict[str, List[Optional[float]]] = {}
+    for i in range(n_b0):
+        for j in range(i + 1, n_b0):
+            vol_i = b0_data[..., i]
+            vol_j = b0_data[..., j]
+            diff  = vol_i - vol_j
+            snr_vals: List[Optional[float]] = []
+            for vn in vial_names:
+                mask      = vial_masks_np[vn]
+                signal    = (float(np.mean(vol_i[mask])) + float(np.mean(vol_j[mask]))) / 2.0
+                noise_std = float(np.std(diff[mask]))
+                if noise_std == 0 or not math.isfinite(noise_std):
+                    snr_vals.append(None)
+                else:
+                    snr = signal * math.sqrt(2) / noise_std
+                    snr_vals.append(None if not math.isfinite(snr) else round(snr, 4))
+            pairs[f"{i}_{j}"] = snr_vals
 
-    return snr_dict
+    print(f"    ✓ Diff SNR: {n_b0} b0 volumes → {len(pairs)} pair(s), {len(vial_names)} vials")
+    return {"vials": vial_names, "n_b0": n_b0, "pairs": pairs}
 
 
 def _process_t1t2_snrcnr_html(
@@ -915,14 +914,22 @@ def _process_dwi_html(
     _sheets["SNR_proc"]      = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_p[vn])}} for vn in vial_names]
     _sheets["CNR_proc"]      = cnr_rows_p
     if diff_snr_p:
-        _sheets["SNR_diff_proc"] = [{"vial": vn, "snr": diff_snr_p.get(vn)} for vn in vial_names]
+        _diff_vials = diff_snr_p["vials"]
+        _sheets["SNR_diff_proc"] = [
+            {"pair": pk, **{_diff_vials[k]: v for k, v in enumerate(pvals)}}
+            for pk, pvals in diff_snr_p["pairs"].items()
+        ]
     if has_raw:
         _sheets["mean_raw"]      = _make_rows(means_r, "mean_raw")
         _sheets["std_raw"]       = _make_rows(stds_r,  "std_raw")
         _sheets["SNR_raw"]       = [{"vial": vn, **{f"vol{i}": v for i, v in enumerate(snr_r[vn])}} for vn in vial_names]
         _sheets["CNR_raw"]       = cnr_rows_r
         if diff_snr_r:
-            _sheets["SNR_diff_raw"] = [{"vial": vn, "snr": diff_snr_r.get(vn)} for vn in vial_names]
+            _diff_vials_r = diff_snr_r["vials"]
+            _sheets["SNR_diff_raw"] = [
+                {"pair": pk, **{_diff_vials_r[k]: v for k, v in enumerate(pvals)}}
+                for pk, pvals in diff_snr_r["pairs"].items()
+            ]
 
     with pd.ExcelWriter(xlsx_file, engine="openpyxl") as writer:
         for sheet_name, rows in _sheets.items():
@@ -945,9 +952,6 @@ def _process_dwi_html(
     _dwi_name = f"{filename_prefix}_DWI" if filename_prefix else "DWI"
     output_html = str(plots_dir / f"{_dwi_name}.html")
 
-    def _diff_snr_list(d):
-        return [d.get(vn) for vn in vial_names] if d else None
-
     build_dwi_html(
         meanb0_nii=meanb0_proc,
         vial_niftis=vial_niftis_map,
@@ -958,8 +962,8 @@ def _process_dwi_html(
         raw_meanb0_nii=meanb0_raw,
         raw_snr_data={"vials": vial_names, "n_vols": n_vols, "snr": _snr_matrix(snr_r)} if has_raw else None,
         raw_cnr_data={"vials": vial_names, "n_vols": n_vols, "cnr": cnr_r} if has_raw else None,
-        diff_snr_data={"vials": vial_names, "snr": _diff_snr_list(diff_snr_p)} if diff_snr_p else None,
-        raw_diff_snr_data={"vials": vial_names, "snr": _diff_snr_list(diff_snr_r)} if diff_snr_r else None,
+        diff_snr_data=diff_snr_p,
+        raw_diff_snr_data=diff_snr_r,
     )
     print(f"    ✓ Generated DWI HTML: {Path(output_html).name}")
 
@@ -1363,6 +1367,7 @@ def PhantomSessionWf(
     output_format: str = "html",
     filename_prefix: str = "",
     rayleigh_correction: bool = False,
+    cpu_threads: int = 1,
 ) -> str:
     """
     End-to-end phantom QC workflow.
@@ -1385,6 +1390,7 @@ def PhantomSessionWf(
             input_image=input_image,
             template_phantom=template_phantom,
             output_prefix=output_prefix,
+            cpu_threads=cpu_threads,
         ),
         name="registration",
     )
@@ -1498,12 +1504,14 @@ class PhantomProcessor:
         output_format: str = "html",
         filename_prefix: str = "",
         rayleigh_correction: bool = False,
+        n_threads: Optional[int] = None,
     ):
         self.template_dir = Path(template_dir)
         self.output_base_dir = Path(output_base_dir)
         self.output_format = output_format
         self.filename_prefix = filename_prefix
         self.rayleigh_correction = rayleigh_correction
+        self.n_threads = n_threads if n_threads is not None else (os.cpu_count() or 1)
 
         # Phantom name is the last component of template_dir (e.g. "SPIRIT")
         self.phantom_name = self.template_dir.name
@@ -1590,6 +1598,7 @@ class PhantomProcessor:
             output_format=self.output_format,
             filename_prefix=self.filename_prefix,
             rayleigh_correction=self.rayleigh_correction,
+            cpu_threads=self.n_threads,
         )
         cache_dir = output_dir / ".pydra_cache"
         if cache_dir.exists():

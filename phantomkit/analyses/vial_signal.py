@@ -187,6 +187,7 @@ def VialSignalAnalysis(
     input_image: NiftiGz,
     template_dir: Directory,
     output_base_dir: Path | None = None,
+    num_threads: int = 1,
 ) -> tuple[Directory, Directory, Directory, NiftiGz]:
     """
     Pydra workflow for processing a single phantom MRI session.
@@ -260,6 +261,7 @@ def VialSignalAnalysis(
             template_phantom=template_phantom,
             session_name=paths.session_name,
             tmp_dir=paths.tmp_dir,
+            num_threads=num_threads,
         ),
         name="registration",
     )

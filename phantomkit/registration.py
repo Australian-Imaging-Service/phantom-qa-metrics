@@ -100,6 +100,7 @@ def RegisterToTemplate(
     template_phantom: NiftiGz,
     session_name: str,
     tmp_dir: Path,
+    num_threads: int = 1,
 ) -> tuple[NiftiGz, File, NiftiGz]:
     """
     Register the input image to the template phantom using ANTs rigid SyN.
@@ -118,7 +119,7 @@ def RegisterToTemplate(
             moving_image=input_image,
             output_prefix=tmp / f"{session_name}_Transformed_",
             transform_type="r",
-            num_threads=8,
+            num_threads=num_threads,
             use_histogram_matching=1,
         ),
         name="reg",
