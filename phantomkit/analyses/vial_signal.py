@@ -333,6 +333,7 @@ def VialSignalAnalysisBatch(
     input_images: list[NiftiGz],
     template_dir: Directory,
     output_base_dir: Path,
+    num_threads: int = 1,
 ) -> list:
     """
     Pydra workflow for batch-processing multiple phantom sessions in parallel.
@@ -371,6 +372,7 @@ def VialSignalAnalysisBatch(
             input_image=input_images,
             template_dir=template_dir,
             output_base_dir=output_base_dir,
+            num_threads=num_threads,
         )
         .split("input_image")
         .combine("input_image"),
