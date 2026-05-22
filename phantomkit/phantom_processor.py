@@ -15,7 +15,9 @@ Contains ``PhantomProcessor``, a class that orchestrates a Pydra workflow:
 Path conventions (shared repo):
     template_data/<phantom>/ImageTemplate.nii.gz
     template_data/<phantom>/VialsLabelled/*.nii.gz
-    template_data/<phantom>/adc_reference.json
+    template_data/phantom_config.json
+    template_data/DIFFUSION-O-3574_Calibration_GSP_PVP_20220331.xlsx
+    template_data/RELAXOMETRY - O-41770_GoldStandPhant_GSP_T1T2_20230125.xlsx
 """
 
 import matplotlib
@@ -1021,13 +1023,13 @@ def _task_generate_plots(
         for v in vial_masks_list
     }
 
-    # Load T1/T2 reference values if available
-    _relaxometry_ref = None
+    # Load T1/T2 reference values from the RELAXOMETRY calibration xlsx.
+    _relaxometry_ref_t1 = None
+    _relaxometry_ref_t2 = None
     if template_dir and phantom_name:
-        _ref_path = Path(template_dir) / phantom_name / "t1t2_reference.json"
-        if _ref_path.exists():
-            with open(_ref_path) as _f:
-                _relaxometry_ref = json.load(_f)
+        from phantomkit.plotting._calibration_reference import load_calibration_reference
+        _relaxometry_ref_t1 = load_calibration_reference(template_dir, phantom_name, "T1")
+        _relaxometry_ref_t2 = load_calibration_reference(template_dir, phantom_name, "T2")
 
     print("\nStep 4: Generating plots")
 
@@ -1157,7 +1159,7 @@ def _task_generate_plots(
                     fits_output=_fits_output,
                     nifti_image=_t1_bg or str(first_file),
                     vial_niftis=_vial_niftis_map or None,
-                    relaxometry_reference=_relaxometry_ref,
+                    relaxometry_reference=_relaxometry_ref_t1 if contrast_type_key == "ir" else _relaxometry_ref_t2,
                     phantom=phantom_name,
                     overlay_contrast=str(first_file) if _t1_bg else None,
                 )
@@ -1520,15 +1522,17 @@ class PhantomProcessor:
         self.vial_dir = self.template_dir / "VialsLabelled"
         self.vial_masks = sorted(self.vial_dir.glob("*.nii.gz"))
 
-        # Load ADC vials from adc_reference.json
-        adc_ref_path = self.template_dir / "adc_reference.json"
-        if not adc_ref_path.exists():
-            raise FileNotFoundError(f"adc_reference.json not found: {adc_ref_path}")
-        with open(adc_ref_path) as fh:
-            adc_ref = json.load(fh)
-        if "vials" not in adc_ref:
-            raise KeyError(f"'vials' key missing from: {adc_ref_path}")
-        self.adc_vials = {v.upper() for v in adc_ref["vials"]}
+        # Load ADC vials from the calibration xlsx via phantom_config.json
+        from phantomkit.plotting._calibration_reference import load_calibration_reference
+        _adc_cal = load_calibration_reference(
+            str(self.template_dir.parent), self.phantom_name, "ADC"
+        )
+        if _adc_cal is None:
+            raise FileNotFoundError(
+                f"ADC calibration data not found for phantom '{self.phantom_name}' "
+                f"in {self.template_dir.parent}"
+            )
+        self.adc_vials = {v.upper() for v in _adc_cal["vials"]}
 
         if not self.template_phantom.exists():
             raise FileNotFoundError(f"Template not found: {self.template_phantom}")

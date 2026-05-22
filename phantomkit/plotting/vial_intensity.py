@@ -57,47 +57,28 @@ def detect_separator(file_path):
         sys.exit(f"Error detecting separator: {e}")
 
 
-def load_adc_reference(template_dir: str, phantom: str) -> dict:
-    """
-    Load ADC reference values from TemplateData/<phantom>/adc_reference.json.
-
-    Returns a dict with keys:
-        'vials'        : list of vial labels in order
-        'adc_mm2_per_s': dict mapping vial label -> reference ADC (mm²/s)
-    """
-    ref_path = os.path.join(template_dir, phantom, "adc_reference.json")
-    if not os.path.isfile(ref_path):
-        sys.exit(
-            f"Error: ADC reference file not found at '{ref_path}'.\n"
-            f"Expected structure: <template_dir>/<phantom>/adc_reference.json"
-        )
-    with open(ref_path) as fh:
-        data = json.load(fh)
-    required_keys = {"vials", "adc_mm2_per_s"}
-    if not required_keys.issubset(data.keys()):
-        sys.exit(f"Error: adc_reference.json must contain keys: {required_keys}")
-    return data
-
-
 def overlay_adc_reference(ax: plt.Axes, ref_data: dict):
-    """
-    Draw per-vial reference ADC values as open circles onto *ax*.
-    Values are converted to ×10⁻³ for display.
+    """Draw per-vial reference ADC values (open circles) onto *ax*.
 
-    Open circles (no fill) are drawn after the measured scatter so both
-    are visible when they coincide.
+    Accepts the multi-temperature format returned by load_calibration_reference.
+    Values at the default temperature are used; they are already in ×10⁻³ mm²/s.
     """
     vials = ref_data["vials"]
-    ref_vals = np.array([ref_data["adc_mm2_per_s"][v] for v in vials])
-    x = np.arange(len(vials))
-    ref_display = ref_vals * 1e3  # convert to ×10⁻³ for display
-
-    # Open circle — no fill, steelblue edge, 1.5× the measured markersize (7→10.5)
+    default_temp = ref_data.get("default_temp")
+    vals = ref_data.get("values_by_temp", {}).get(default_temp, {})
+    x_pos, y_pos = [], []
+    for j, v in enumerate(vials):
+        val = vals.get(v.upper())
+        if val is not None:
+            x_pos.append(j)
+            y_pos.append(val)  # already in ×10⁻³ mm²/s
+    if not x_pos:
+        return
     ax.scatter(
-        x,
-        ref_display,
+        x_pos,
+        y_pos,
         marker="o",
-        s=110,  # approx 10.5² ≈ 110
+        s=110,
         facecolors="none",
         edgecolors="steelblue",
         linewidths=1.5,
@@ -256,33 +237,57 @@ def _build_vial_intensity_html(
             }
         datasets.append(scatter_ds)
 
-    # Reference ADC overlay dataset
+    ref_by_temp_json = "null"
+    temp_selector_html = ""
+    default_temp_js = "null"
+
+    # Reference ADC overlay dataset (multi-temperature)
     if ref_data is not None:
-        ref_vials = ref_data["vials"]
-        ref_vals_display = {
-            v: ref_data["adc_mm2_per_s"][v] * 1e3 for v in ref_vials
-        }
-        # Case-insensitive lookup so CSV vial labels match the reference JSON
-        ref_vals_upper = {k.upper(): val for k, val in ref_vals_display.items()}
+        default_temp = ref_data["default_temp"]
+        temp_vals = ref_data["values_by_temp"].get(default_temp, {})
         ref_pts = []
         for j, v in enumerate(vials):
-            val = ref_vals_upper.get(v.upper())
+            val = temp_vals.get(v.upper())
             if val is not None:
                 ref_pts.append({"x": j, "y": val})
-        if ref_pts:
-            datasets.append({
-                "label": "Reference ADC",
-                "data": ref_pts,
-                "borderColor": "transparent",
-                "backgroundColor": "transparent",
-                "pointBackgroundColor": "transparent",
-                "pointBorderColor": "#C62828",  # red open circles for reference
-                "pointBorderWidth": 2,
-                "pointRadius": 8,
-                "pointStyle": "circle",
-                "borderWidth": 0,
-                "showLine": False,
-            })
+        datasets.append({
+            "label": "Reference ADC",
+            "data": ref_pts,
+            "borderColor": "transparent",
+            "backgroundColor": "transparent",
+            "pointBackgroundColor": "transparent",
+            "pointBorderColor": "#C62828",
+            "pointBorderWidth": 2,
+            "pointRadius": 8,
+            "pointStyle": "circle",
+            "borderWidth": 0,
+            "showLine": False,
+        })
+        ref_by_temp: dict[str, list] = {}
+        for temp_str, vals_dict in ref_data["values_by_temp"].items():
+            pts = []
+            for j, v in enumerate(vials):
+                val = vals_dict.get(v.upper())
+                if val is not None:
+                    pts.append({"x": j, "y": val})
+            ref_by_temp[temp_str] = pts
+        ref_by_temp_json = json.dumps(ref_by_temp)
+        default_temp_js = json.dumps(default_temp)
+        temp_options_parts = []
+        for t in ref_data["temperatures"]:
+            sel = " selected" if str(t) == default_temp else ""
+            temp_options_parts.append(f'<option value="{t}"{sel}>{t} °C</option>')
+        temp_options = "".join(temp_options_parts)
+        temp_selector_html = (
+            '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+            + '<span style="font-size:13px;color:var(--text2);">Reference temperature:</span>'
+            + '<select id="refTempSelect" onchange="pkSetRefTemp(this.value)"'
+            + ' style="background:var(--bg3);color:var(--text);border:1px solid var(--border);'
+            + 'border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer;">'
+            + temp_options
+            + '</select>'
+            + '</div>'
+        )
 
     datasets_json = json.dumps(datasets)
     vials_json = json.dumps(list(vials))
@@ -312,6 +317,7 @@ def _build_vial_intensity_html(
 
 <div class="chart-card">
   <div class="chart-title">{title}</div>
+  {temp_selector_html}
   <div class="chart-wrap" style="height:340px"><canvas id="intensityChart"></canvas></div>
 </div>
 
@@ -330,6 +336,16 @@ const VIALS = {vials_json};
 const DATASETS = {datasets_json};
 const PK_DATA = {pk_data_json};
 const N_VOLS = {n_vols};
+const REF_BY_TEMP = {ref_by_temp_json};
+let _pkRefTemp = {default_temp_js};
+
+function pkSetRefTemp(temp) {{
+    _pkRefTemp = temp;
+    const refDs = chart.data.datasets.find(d => d.label === "Reference ADC");
+    if (!refDs || REF_BY_TEMP === null) return;
+    refDs.data = REF_BY_TEMP[temp] || [];
+    chart.update("none");
+}}
 
 {ERROR_BAR_PLUGIN_JS}
 {PK_TOGGLE_JS}
@@ -436,7 +452,7 @@ def main():
         default=None,
         help=(
             "Path to the TemplateData directory.  "
-            "ADC reference is read from <template_dir>/<phantom>/adc_reference.json.  "
+            "ADC reference is read from the calibration xlsx via phantom_config.json.  "
             "Required when the csv_file name contains 'ADC'."
         ),
     )
@@ -493,7 +509,7 @@ def plot_vial_intensity(
     phantom : str, optional
         Phantom name for ADC reference lookup.
     template_dir : str, optional
-        Directory containing per-phantom adc_reference.json files.
+        Directory containing phantom_config.json and calibration xlsx files.
     output_format : str
         "html" (default) for interactive HTML, or "png" for static matplotlib figure.
     """
@@ -566,10 +582,11 @@ def plot_vial_intensity(
 
     # ---- Load ADC reference (ADC mode only) --------------------------------
     ref_data = None
-    if contrast_mode == "adc":
-        ref_data = load_adc_reference(template_dir, phantom)
+    if contrast_mode == "adc" and template_dir:
+        from phantomkit.plotting._calibration_reference import load_calibration_reference
+        ref_data = load_calibration_reference(template_dir, phantom, "ADC")
 
-    # ---- In ADC mode, restrict to vials defined in adc_reference.json ------
+    # ---- In ADC mode, restrict to vials with known calibration reference ------
     if contrast_mode == "adc" and ref_data is not None:
         adc_vials = [v.upper() for v in ref_data["vials"]]
         mask = vials.str.upper().isin(adc_vials)

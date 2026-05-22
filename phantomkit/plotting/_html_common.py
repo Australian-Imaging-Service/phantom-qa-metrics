@@ -953,8 +953,21 @@ def build_relaxometry_html(
     ref_chart_js = ""
     if ref_data is not None and fit_results:
         _ref_vials = ref_data.get("vials", [])
-        _ref_vals = ref_data.get(fit_key, {})
-        _ref_upper = {k.upper(): v for k, v in _ref_vals.items()}
+
+        # Support both old format {T1_ms/T2_ms: {vial: val}} and new multi-temp format
+        if "values_by_temp" in ref_data:
+            _default_temp = ref_data.get("default_temp")
+            _temperatures = ref_data.get("temperatures", [])
+            _vals_by_temp = ref_data.get("values_by_temp", {})
+            _ref_vals_at_default = _vals_by_temp.get(_default_temp, {}) if _default_temp else {}
+        else:
+            # Legacy single-temp format (no values_by_temp key)
+            _old_vals = ref_data.get(fit_key, {})
+            _ref_vals_at_default = {v.upper(): float(val) for v, val in _old_vals.items() if val is not None}
+            _default_temp = None
+            _temperatures = []
+            _vals_by_temp = {}
+
         def _build_meas_pts(results):
             mmap = {
                 r.get("Vial", "").upper(): r.get(fit_key)
@@ -969,15 +982,23 @@ def build_relaxometry_html(
 
         _meas_pts = _build_meas_pts(fit_results)
         _meas_pts_median = _build_meas_pts(fit_results_median or fit_results)
-        _ref_pts = []
-        for _j, _v in enumerate(_ref_vials):
-            _mu = _v.upper()
-            if _ref_upper.get(_mu) is not None:
-                _ref_pts.append({"x": _j, "y": float(_ref_upper[_mu])})
+        _ref_pts = [
+            {"x": _j, "y": float(_ref_vals_at_default[_v.upper()])}
+            for _j, _v in enumerate(_ref_vials)
+            if _ref_vals_at_default.get(_v.upper()) is not None
+        ]
+
+        _ref_by_temp: dict[str, list] = {}
+        for _temp_str, _vals_dict in _vals_by_temp.items():
+            _ref_by_temp[_temp_str] = [
+                {"x": _j, "y": float(_vals_dict[_v.upper()])}
+                for _j, _v in enumerate(_ref_vials)
+                if _vals_dict.get(_v.upper()) is not None
+            ]
 
         _unit_label = "T\u2081 (ms)" if fit_key == "T1_ms" else "T\u2082 (ms)"
-        _meas_color = "#378ADD"   # blue filled  — measured
-        _ref_color = "#C62828"    # red open circles — reference
+        _meas_color = "#378ADD"
+        _ref_color = "#C62828"
         _meas_ds = {
             "label": f"Measured {_unit_label}",
             "_refMeas": True,
@@ -1008,15 +1029,41 @@ def build_relaxometry_html(
         _ref_ds_json = json.dumps(_ref_ds)
         _ref_meas_json = json.dumps({"mean": _meas_pts, "median": _meas_pts_median})
         _unit_label_json = json.dumps(_unit_label)
+        _ref_by_temp_json = json.dumps(_ref_by_temp)
+        _default_temp_json = json.dumps(_default_temp)
+
+        _ref_units = ref_data.get("units", "ms")
+        if _temperatures:
+            _temp_options_parts = []
+            for _t in _temperatures:
+                _sel = " selected" if str(_t) == _default_temp else ""
+                _temp_options_parts.append(f'<option value="{_t}"{_sel}>{_t} °C</option>')
+            _temp_options = "".join(_temp_options_parts)
+            _temp_selector_html = (
+                '<div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;">'
+                + '<span style="font-size:13px;color:var(--text2);">Reference temperature:</span>'
+                + '<select id="refChartTempSelect" onchange="pkSetRefChartTemp(this.value)"'
+                + ' style="background:var(--bg3);color:var(--text);border:1px solid var(--border);'
+                + 'border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer;">'
+                + _temp_options
+                + '</select>'
+                + '</div>'
+            )
+        else:
+            _temp_selector_html = ""
 
         ref_chart_html = f"""<div class="chart-card" style="margin-bottom:20px;">
   <div class="chart-title">Measured vs Reference {_unit_label}</div>
+  {_temp_selector_html}
   <div class="chart-wrap" style="height:260px"><canvas id="refChart"></canvas></div>
 </div>"""
 
         ref_chart_js = f"""
 const _REF_VIALS = {_vial_labels_json};
 const _REF_MEAS = {_ref_meas_json};
+const _REF_BY_TEMP = {_ref_by_temp_json};
+let _pkRefChartTemp = {_default_temp_json};
+let refChart;
 (function() {{
   const opts = baseOpts("Vial", {_unit_label_json});
   opts.scales.x.type = "linear";
@@ -1025,12 +1072,19 @@ const _REF_MEAS = {_ref_meas_json};
   opts.plugins.legend.display = true;
   opts.plugins.legend.onClick = null;
   opts.plugins.legend.labels = {{ color: "#888780", font: {{ size: 12 }} }};
-  const refChart = new Chart(
+  refChart = new Chart(
     document.getElementById("refChart").getContext("2d"),
     {{ type: "line", data: {{ datasets: [{_meas_ds_json}, {_ref_ds_json}] }}, options: opts }}
   );
   _pkCharts.push(refChart);
-}})();"""
+}})();
+function pkSetRefChartTemp(temp) {{
+  _pkRefChartTemp = temp;
+  const refDs = refChart.data.datasets.find(d => d.label && d.label.startsWith("Reference"));
+  if (!refDs || !_REF_BY_TEMP) return;
+  refDs.data = _REF_BY_TEMP[temp] || [];
+  refChart.update("none");
+}}"""
 
     # ------------------------------------------------------------------
     # Optional NiiVue viewer panel

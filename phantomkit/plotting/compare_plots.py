@@ -142,41 +142,16 @@ def _auto_template_dir() -> str | None:
     return None
 
 
-def _load_reference(
-    metric: str, template_dir: str, phantom: str
-) -> tuple[list[str], dict[str, float]]:
-    """Load reference values for *metric* from template_data.
+def _load_reference(metric: str, template_dir: str, phantom: str) -> dict | None:
+    """Load temperature-dependent reference values for *metric* from the calibration xlsx.
 
-    Returns (vials_ordered, {vial_upper: value}).
-    ADC values are scaled to ×10⁻³ mm²/s to match the display units stored in
-    the HTML.
+    Returns the ``load_calibration_reference`` dict or ``None`` if unavailable.
+    ADC values are in ×10⁻³ mm²/s; T1/T2 values are in ms.
     """
-    ref_dir = Path(template_dir) / phantom
-
-    if metric == "ADC":
-        ref_file = ref_dir / "adc_reference.json"
-        if not ref_file.exists():
-            return [], {}
-        with open(ref_file) as fh:
-            raw = json.load(fh)
-        vials = raw.get("vials", [])
-        vals_raw = raw.get("adc_mm2_per_s", {})
-        vals = {v.upper(): float(vals_raw[v]) * 1e3 for v in vials if v in vals_raw}
-        return vials, vals
-
-    if metric in ("T1", "T2"):
-        ref_file = ref_dir / "t1t2_reference.json"
-        if not ref_file.exists():
-            return [], {}
-        with open(ref_file) as fh:
-            raw = json.load(fh)
-        vials = raw.get("vials", [])
-        key = "T1_ms" if metric == "T1" else "T2_ms"
-        vals_raw = raw.get(key, {})
-        vals = {v.upper(): float(vals_raw[v]) for v in vials if v in vals_raw}
-        return vials, vals
-
-    return [], {}
+    if metric not in ("ADC", "T1", "T2"):
+        return None
+    from phantomkit.plotting._calibration_reference import load_calibration_reference
+    return load_calibration_reference(template_dir, phantom, metric)
 
 
 # ---------------------------------------------------------------------------
@@ -267,8 +242,8 @@ _Y_LABELS: dict[str, str] = {
 def _build_html(
     metric: str,
     vial_axis: list[str],
-    sessions: list[dict],       # [{label, color, vials_order, vals, se_vals}]
-    ref_vals: dict[str, float], # {vial_upper: value}
+    sessions: list[dict],  # [{label, color, vials_order, vals, se_vals}]
+    ref_data: dict | None, # from load_calibration_reference, or None
 ) -> str:
     from phantomkit.plotting._html_common import html_head
 
@@ -292,13 +267,29 @@ def _build_html(
             "data": pts,
         })
 
-    # -- Reference point data
+    # -- Reference point data (default temperature)
+    ref_by_temp: dict[str, list] = {}
+    temperatures: list = []
+    default_temp: str | None = None
+    if ref_data is not None:
+        default_temp = ref_data.get("default_temp")
+        temperatures = ref_data.get("temperatures", [])
+        for temp_str, vals_dict in ref_data.get("values_by_temp", {}).items():
+            ref_by_temp[temp_str] = [
+                {"x": vial_upper_to_x[v.upper()], "y": round(vals_dict[v.upper()], 4)}
+                for v in vial_axis
+                if vals_dict.get(v.upper()) is not None
+            ]
+    ref_vals_at_default = (
+        ref_data["values_by_temp"].get(default_temp, {})
+        if ref_data and default_temp else {}
+    )
     ref_pts = [
-        {"x": vial_upper_to_x[v.upper()], "y": round(ref_vals[v.upper()], 4)}
+        {"x": vial_upper_to_x[v.upper()], "y": round(ref_vals_at_default[v.upper()], 4)}
         for v in vial_axis
-        if ref_vals.get(v.upper()) is not None
+        if ref_vals_at_default.get(v.upper()) is not None
     ]
-    has_ref = bool(ref_pts)
+    has_ref = bool(ref_pts) or bool(ref_by_temp)
 
     sessions_json    = json.dumps(session_datasets)
     ref_pts_json     = json.dumps(ref_pts)
@@ -343,6 +334,29 @@ def _build_html(
         '<span style="font-size:14px;color:var(--text2);">Group mean (&#x25a0;)</span></div>'
     )
 
+    temp_selector_html = ""
+    if ref_data is not None and temperatures:
+        temp_options_parts = []
+        for t in temperatures:
+            sel = " selected" if str(t) == default_temp else ""
+            temp_options_parts.append(f'<option value="{t}"{sel}>{t} °C</option>')
+        temp_options = "".join(temp_options_parts)
+        ref_units = ref_data.get("units", "")
+        temp_selector_html = (
+            '\n    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+            + '<span style="font-size:14px;color:var(--text2);">Reference temperature:</span>'
+            + '<select id="refTempSelect" onchange="pkSetRefTemp(this.value)"'
+            + ' style="background:var(--bg3);color:var(--text);border:1px solid var(--border);'
+            + 'border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer;">'
+            + temp_options
+            + '</select>'
+            + f'<span style="font-size:12px;color:var(--text2);">{ref_units}</span>'
+            + '</div>'
+        )
+
+    ref_by_temp_json = json.dumps(ref_by_temp)
+    default_temp_json = json.dumps(default_temp)
+
     head = html_head(title)
 
     return f"""{head}
@@ -356,6 +370,7 @@ def _build_html(
     <div id="pk-session-controls">
 {session_controls_html}
 {ref_legend_html}
+{temp_selector_html}
 {mean_legend_html}
     </div>
   </div>
@@ -377,6 +392,8 @@ const SESSIONS    = {sessions_json};
 const REF_PTS     = {ref_pts_json};
 const VIAL_LABELS = {vial_labels_json};
 const REF_COLOR   = {ref_color_json};
+const REF_BY_TEMP = {ref_by_temp_json};
+let _pkRefTemp    = {default_temp_json};
 
 const isDark   = window.matchMedia("(prefers-color-scheme: dark)").matches;
 const gridCol  = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.07)";
@@ -521,6 +538,14 @@ function pkUpdateMean() {{
   chart.data.datasets[MEAN_IDX].data = meanPts;
   chart.update();
 }}
+
+function pkSetRefTemp(temp) {{
+  _pkRefTemp = temp;
+  const refDs = chart.data.datasets.find(d => d.label === "Reference");
+  if (!refDs || !REF_BY_TEMP) return;
+  refDs.data = REF_BY_TEMP[temp] || [];
+  chart.update("none");
+}}
 </script>
 </body>
 </html>
@@ -630,7 +655,7 @@ def main(
 
     # ---- Load reference values
     ref_vials: list[str] = []
-    ref_vals: dict[str, float] = {}
+    ref_data_loaded: dict | None = None
     resolved_template_dir = template_dir or _auto_template_dir()
 
     if resolved_template_dir and phantom is None:
@@ -645,7 +670,8 @@ def main(
         ]
         best_overlap, best_candidate = 0, None
         for cand in candidates:
-            cand_vials, _ = _load_reference(metric, resolved_template_dir, cand)
+            cand_ref = _load_reference(metric, resolved_template_dir, cand)
+            cand_vials = cand_ref["vials"] if cand_ref else []
             overlap = len({v.upper() for v in cand_vials} & measured_upper)
             if overlap > best_overlap:
                 best_overlap, best_candidate = overlap, cand
@@ -653,9 +679,15 @@ def main(
             phantom = best_candidate
 
     if resolved_template_dir and phantom:
-        ref_vials, ref_vals = _load_reference(metric, resolved_template_dir, phantom)
+        ref_data_loaded = _load_reference(metric, resolved_template_dir, phantom)
 
-    if not ref_vals:
+    ref_vials = ref_data_loaded["vials"] if ref_data_loaded else []
+    ref_vals_check: dict = (
+        ref_data_loaded["values_by_temp"].get(ref_data_loaded["default_temp"], {})
+        if ref_data_loaded else {}
+    )
+
+    if not ref_vals_check:
         click.echo(
             "[WARN] Reference values not loaded — provide --template-dir and --phantom "
             "to overlay reference data.",
@@ -666,7 +698,7 @@ def main(
     vial_axis = _vial_axis(sessions, ref_vials)
 
     # ---- Generate and write HTML
-    html = _build_html(metric, vial_axis, sessions, ref_vals)
+    html = _build_html(metric, vial_axis, sessions, ref_data_loaded)
     out_path = Path(output)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(html, encoding="utf-8")

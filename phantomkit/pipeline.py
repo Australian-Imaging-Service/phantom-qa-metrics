@@ -49,7 +49,9 @@ Path conventions (shared repo)
 -------------------------------
   template_data/<phantom>/ImageTemplate.nii.gz
   template_data/<phantom>/VialsLabelled/*.nii.gz
-  template_data/<phantom>/adc_reference.json
+  template_data/phantom_config.json
+  template_data/DIFFUSION-O-3574_Calibration_GSP_PVP_20220331.xlsx
+  template_data/RELAXOMETRY - O-41770_GoldStandPhant_GSP_T1T2_20230125.xlsx
   template_data/rotations.txt
 
 The template_data/ directory is resolved relative to the installed
@@ -355,6 +357,7 @@ def run_stage2(
     template_dir: Path,
     dry_run: bool,
     input_identifier: str = "",
+    n_threads: int = 1,
 ):
     """
     For each DWI output directory, run PhantomProcessor on
@@ -474,6 +477,7 @@ def run_stage3(
     scan_info: dict,
     dry_run: bool,
     input_identifier: str = "",
+    n_threads: int = 1,
 ):
     """
     Convert T1, IR, and TE DICOMs to NIfTI into a staging folder, then
@@ -788,14 +792,14 @@ def main():
 
     # Stage 2 — Phantom QC in DWI space (follows Stage 1)
     if run_stage1_flag:
-        run_stage2(dwi_output_dirs, output_dir, template_dir, args.dry_run, input_identifier)
+        run_stage2(dwi_output_dirs, output_dir, template_dir, args.dry_run, input_identifier, n_threads)
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")
 
     # Stage 3 — Phantom QC on native contrasts
     if run_stage3_flag:
-        run_stage3(input_dir, output_dir, template_dir, scan_info, args.dry_run, input_identifier)
+        run_stage3(input_dir, output_dir, template_dir, scan_info, args.dry_run, input_identifier, n_threads)
     else:
         print_header("STAGE 3 — Phantom QC on Native Contrasts")
         if not scan_info["t1_dirs"]:
