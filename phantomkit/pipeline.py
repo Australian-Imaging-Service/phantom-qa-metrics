@@ -62,8 +62,6 @@ import argparse
 import os
 import re
 import shutil
-import subprocess
-import sys
 from pathlib import Path
 
 
@@ -94,14 +92,6 @@ def _find_template_data_root() -> Path:
 TEMPLATE_DATA_ROOT = _find_template_data_root()
 
 
-def _find_dwi_processing_script() -> Path:
-    """Locate dwi_processing.py within the package."""
-    return Path(__file__).resolve().parent / "dwi_processing.py"
-
-
-DWI_SCRIPT = _find_dwi_processing_script()
-
-CALIBRATION_PLOTTER_SCRIPT = Path(__file__).resolve().parent / "plotting" / "calibration_plotter.py"
 CALIBRATION_LUT = TEMPLATE_DATA_ROOT / "DIFFUSION-O-3574_Calibration_GSP_PVP_20220331.xlsx"
 PHANTOM_CONFIG = TEMPLATE_DATA_ROOT / "phantom_config.json"
 
@@ -300,37 +290,30 @@ def derive_session_name(input_dir: Path) -> str:
 
 def run_stage1(input_dir: Path, output_dir: Path, cfg: dict, dry_run: bool) -> list:
     """
-    Run dwi_processing.py on input_dir.
+    Run DWI processing on input_dir.
     Returns list of DWI output subdirectory Paths (one per processed series).
     """
     print_header("STAGE 1 — DWI Processing")
 
-    cmd = [
-        sys.executable,
-        str(DWI_SCRIPT),
-        "--scans-dir",
-        str(input_dir),
-        "--output-dir",
-        str(output_dir),
-    ]
-
-    if cfg.get("denoise_degibbs"):
-        cmd.append("--denoise-degibbs")
-    if cfg.get("gradcheck"):
-        cmd.append("--gradcheck")
-    if cfg.get("nocleanup"):
-        cmd.append("--nocleanup")
-    if cfg.get("readout_time") is not None:
-        cmd += ["--readout-time", str(cfg["readout_time"])]
-    if cfg.get("eddy_options") is not None:
-        cmd += ["--eddy-options", cfg["eddy_options"]]
-
     if dry_run:
-        print("  [DRY RUN] Would execute:")
-        print(f"  {' '.join(str(c) for c in cmd)}\n")
+        print("  [DRY RUN] Would run DWI processing pipeline.\n")
         return []
 
-    run_cmd(cmd, "Stage 1 (DWI processing)")
+    from phantomkit.dwi_processing import run_pipeline as dwi_run_pipeline
+
+    dwi_cfg: dict = {
+        "scans_dir": str(input_dir),
+        "output_dir": str(output_dir),
+        "denoise_degibbs": cfg.get("denoise_degibbs", False),
+        "gradcheck": cfg.get("gradcheck", False),
+        "keep_tmp": cfg.get("nocleanup", False),
+    }
+    if cfg.get("readout_time") is not None:
+        dwi_cfg["readout_time"] = cfg["readout_time"]
+    if cfg.get("eddy_options") is not None:
+        dwi_cfg["eddy_options"] = cfg["eddy_options"]
+
+    dwi_run_pipeline(dwi_cfg)
 
     _t1_names = {"T1_in_DWI_space.nii.gz", "T1.nii.gz"}
     dwi_output_dirs = [
@@ -420,15 +403,26 @@ def run_calibration_plot(
     dry_run: bool,
 ):
     """
-    For each processed DWI series, run the calibration plotter in vials mode
-    to estimate vial temperatures from the ADC_mean_matrix.csv produced by
-    Stage 2.  Output HTML is written to <series>/plots/.
+    For each processed DWI series, estimate vial temperatures from the
+    ADC_mean_matrix.csv produced by Stage 2 and write an HTML report.
     """
     print_header("STAGE 4 — Calibration Temperature Estimation")
 
     if not dwi_output_dirs:
         print("  No DWI output directories — skipping calibration plots.\n")
         return
+
+    from phantomkit.plotting.calibration_plotter import (
+        parse_calibration_xlsx,
+        parse_vials_csv,
+        load_phantom_config,
+        build_vial_map,
+        estimate_temperature,
+        build_vials_html,
+    )
+
+    formulations = parse_calibration_xlsx(str(CALIBRATION_LUT))
+    phantom_cfg = load_phantom_config(str(PHANTOM_CONFIG))
 
     for dwi_dir in dwi_output_dirs:
         session_name = dwi_dir.name
@@ -449,17 +443,30 @@ def run_calibration_plot(
             print("  [DRY RUN] Would run calibration plotter.\n")
             continue
 
-        cmd = [
-            sys.executable,
-            str(CALIBRATION_PLOTTER_SCRIPT),
-            "vials",
-            str(CALIBRATION_LUT),
-            str(adc_csv),
-            str(PHANTOM_CONFIG),
-            "--phantom", phantom,
-            "--output", str(output_html),
-        ]
-        run_cmd(cmd, f"Calibration plotter ({session_name})")
+        try:
+            vial_map = build_vial_map(phantom_cfg, phantom)
+        except KeyError as e:
+            print(f"  ERROR: {e} — skipping calibration plot for {session_name}.\n")
+            continue
+
+        vials_adc = parse_vials_csv(str(adc_csv))
+        results = []
+        for vial, adc_raw in vials_adc.items():
+            form_query = vial_map.get(vial)
+            if form_query is None:
+                print(f"  Vial {vial}: not in phantom {phantom!r} — skipping")
+                continue
+            try:
+                res = estimate_temperature(
+                    formulations, str(form_query), D=adc_raw, vial=vial
+                )
+                results.append(res)
+            except ValueError as e:
+                print(f"  Vial {vial}: {e}")
+
+        output_html.parent.mkdir(parents=True, exist_ok=True)
+        with open(str(output_html), "w", encoding="utf-8") as f:
+            f.write(build_vials_html(formulations, results, phantom_name=phantom))
         print()
 
     print("  Stage 4 complete.\n")
@@ -586,19 +593,18 @@ def run_stage3(
 # ---------------------------------------------------------------------------
 
 
-def validate_inputs(args):
-    """Validate paths and phantom name before any processing."""
+def validate_inputs(input_dir: Path, phantom: str) -> None:
+    """Validate paths and phantom name before any processing. Raises RuntimeError."""
     errors = []
 
-    input_dir = Path(args.input_dir)
     if not input_dir.is_dir():
         errors.append(f"--input-dir does not exist or is not a directory: {input_dir}")
 
-    phantom_dir = TEMPLATE_DATA_ROOT / args.phantom
+    phantom_dir = TEMPLATE_DATA_ROOT / phantom
     if not phantom_dir.is_dir():
         errors.append(
             f"Phantom template directory not found: {phantom_dir}\n"
-            f"  Expected: template_data/{args.phantom}/"
+            f"  Expected: template_data/{phantom}/"
         )
     else:
         template_img = phantom_dir / "ImageTemplate.nii.gz"
@@ -610,18 +616,14 @@ def validate_inputs(args):
                 f"VialsLabelled/ with .nii.gz masks not found in: {phantom_dir}"
             )
 
-    if not DWI_SCRIPT.exists():
-        errors.append(f"DWI processing script not found: {DWI_SCRIPT}")
-
     if errors:
-        print("\nValidation errors:")
-        for e in errors:
-            print(f"  ✗ {e}")
-        sys.exit(1)
+        raise RuntimeError(
+            "Validation errors:\n" + "\n".join(f"  ✗ {e}" for e in errors)
+        )
 
 
 # ---------------------------------------------------------------------------
-# Main
+# Orchestration
 # ---------------------------------------------------------------------------
 
 
@@ -639,78 +641,29 @@ def _cleanup_tmp_only_dirs(output_dir: Path) -> None:
             print(f"  Removed tmp-only directory: {d.name}")
 
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="End-to-end phantomkit phantom QC + DWI processing pipeline.",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__,
-    )
+def run_full_pipeline(
+    input_dir: Path,
+    output_dir: Path,
+    phantom: str,
+    *,
+    denoise_degibbs: bool = False,
+    gradcheck: bool = False,
+    nocleanup: bool = False,
+    readout_time: float | None = None,
+    eddy_options: str | None = None,
+    dry_run: bool = False,
+) -> Path:
+    """Run the full phantom QA pipeline and return the output directory.
 
-    parser.add_argument(
-        "--input-dir",
-        required=True,
-        help=(
-            "Root directory containing acquisition subdirectories. "
-            "Each sub-directory may hold DICOM, NIfTI (.nii/.nii.gz), "
-            "or MIF (.mif/.mif.gz) files — format is detected automatically."
-        ),
-    )
-    parser.add_argument(
-        "--output-dir",
-        required=True,
-        help="Top-level output directory.  All results are written here.",
-    )
-    parser.add_argument(
-        "--phantom",
-        required=True,
-        help="Phantom name, e.g. SPIRIT.  Used to locate template_data/<phantom>/.",
-    )
-    parser.add_argument(
-        "--denoise-degibbs",
-        action="store_true",
-        default=False,
-        help="Apply dwidenoise + mrdegibbs before preprocessing.",
-    )
-    parser.add_argument(
-        "--gradcheck",
-        action="store_true",
-        default=False,
-        help="Run dwigradcheck to verify gradient orientations.",
-    )
-    parser.add_argument(
-        "--nocleanup",
-        action="store_true",
-        default=False,
-        help="Keep DWI tmp/ intermediate directories.",
-    )
-    parser.add_argument(
-        "--readout-time",
-        type=float,
-        default=None,
-        help="Override TotalReadoutTime (seconds) for dwifslpreproc.",
-    )
-    parser.add_argument(
-        "--eddy-options",
-        type=str,
-        default=None,
-        help="Override FSL eddy options string.",
-    )
-    parser.add_argument(
-        "--dry-run",
-        action="store_true",
-        default=False,
-        help="Plan and print commands; do not execute any processing.",
-    )
-
-    args = parser.parse_args()
-
-    input_dir = Path(args.input_dir).resolve()
-    output_dir = Path(args.output_dir).resolve()
-    phantom = args.phantom
+    This is the primary Python entry point. The CLI ``phantomkit pipeline``
+    and the Pydra task in ``phantomkit.pydra_task`` both call this function.
+    """
+    input_dir = Path(input_dir).resolve()
+    output_dir = Path(output_dir).resolve()
     template_dir = TEMPLATE_DATA_ROOT / phantom
     input_identifier = derive_session_name(input_dir)
 
-    validate_inputs(args)
+    validate_inputs(input_dir, phantom)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     n_threads = os.cpu_count() or 1
@@ -719,11 +672,11 @@ def main():
     input_dir = _wrap_flat_inputs(input_dir, output_dir)
 
     dwi_cfg = {
-        "denoise_degibbs": args.denoise_degibbs,
-        "gradcheck": args.gradcheck,
-        "nocleanup": args.nocleanup,
-        "readout_time": args.readout_time,
-        "eddy_options": args.eddy_options,
+        "denoise_degibbs": denoise_degibbs,
+        "gradcheck": gradcheck,
+        "nocleanup": nocleanup,
+        "readout_time": readout_time,
+        "eddy_options": eddy_options,
     }
 
     # ── Discover what's in the input directory ───────────────────────────────
@@ -773,33 +726,28 @@ def main():
     )
     print()
 
-    if args.dry_run:
+    if dry_run:
         print("  NOTE: --dry-run is active.  No processing will be performed.\n")
 
     # ── Execution ─────────────────────────────────────────────────────────────
-    # Stages run sequentially: 1 → 2 → 3 → 4.
-    # (Stage 1 shells out to dwifslpreproc/eddy which are already multi-threaded;
-    # Stage 3 runs ANTs which is also multi-threaded. Parallel execution of
-    # stages gives no wall-time benefit and produces interleaved output.)
-
     # Stage 1 — DWI processing
     dwi_output_dirs = []
     if run_stage1_flag:
-        dwi_output_dirs = run_stage1(input_dir, output_dir, dwi_cfg, args.dry_run)
+        dwi_output_dirs = run_stage1(input_dir, output_dir, dwi_cfg, dry_run)
     else:
         print_header("STAGE 1 — DWI Processing")
         print("  Skipped: no DWI acquisitions found.\n")
 
     # Stage 2 — Phantom QC in DWI space (follows Stage 1)
     if run_stage1_flag:
-        run_stage2(dwi_output_dirs, output_dir, template_dir, args.dry_run, input_identifier, n_threads)
+        run_stage2(dwi_output_dirs, output_dir, template_dir, dry_run, input_identifier, n_threads)
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")
 
     # Stage 3 — Phantom QC on native contrasts
     if run_stage3_flag:
-        run_stage3(input_dir, output_dir, template_dir, scan_info, args.dry_run, input_identifier, n_threads)
+        run_stage3(input_dir, output_dir, template_dir, scan_info, dry_run, input_identifier, n_threads)
     else:
         print_header("STAGE 3 — Phantom QC on Native Contrasts")
         if not scan_info["t1_dirs"]:
@@ -809,20 +757,20 @@ def main():
 
     # Stage 4 — Calibration temperature estimation (requires Stage 1/2 ADC output)
     if run_stage1_flag:
-        run_calibration_plot(dwi_output_dirs, output_dir, phantom, args.dry_run)
+        run_calibration_plot(dwi_output_dirs, output_dir, phantom, dry_run)
     else:
         print_header("STAGE 4 — Calibration Temperature Estimation")
         print("  Skipped: no DWI acquisitions found.\n")
 
     # ── Cleanup tmp-only directories ─────────────────────────────────────────
-    if not args.dry_run:
+    if not dry_run:
         _cleanup_tmp_only_dirs(output_dir)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_header("Pipeline Complete")
     print(f"  All outputs written to: {output_dir}\n")
 
-    if not args.dry_run:
+    if not dry_run:
         print("  Output structure:")
         for item in sorted(output_dir.iterdir()):
             if item.is_dir():
@@ -833,6 +781,44 @@ def main():
                     else:
                         print(f"      {sub.name}")
         print()
+
+    return output_dir
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="End-to-end phantomkit phantom QC + DWI processing pipeline.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=__doc__,
+    )
+    parser.add_argument("--input-dir", required=True)
+    parser.add_argument("--output-dir", required=True)
+    parser.add_argument("--phantom", required=True)
+    parser.add_argument("--denoise-degibbs", action="store_true", default=False)
+    parser.add_argument("--gradcheck", action="store_true", default=False)
+    parser.add_argument("--nocleanup", action="store_true", default=False)
+    parser.add_argument("--readout-time", type=float, default=None)
+    parser.add_argument("--eddy-options", type=str, default=None)
+    parser.add_argument("--dry-run", action="store_true", default=False)
+
+    args = parser.parse_args()
+
+    run_full_pipeline(
+        input_dir=Path(args.input_dir),
+        output_dir=Path(args.output_dir),
+        phantom=args.phantom,
+        denoise_degibbs=args.denoise_degibbs,
+        gradcheck=args.gradcheck,
+        nocleanup=args.nocleanup,
+        readout_time=args.readout_time,
+        eddy_options=args.eddy_options,
+        dry_run=args.dry_run,
+    )
 
 
 if __name__ == "__main__":

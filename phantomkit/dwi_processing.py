@@ -31,6 +31,8 @@ from pathlib import Path
 from pydra.compose import python, workflow
 from pydra.engine import Submitter
 import yaml
+from fileformats.medimage import NiftiGz
+from fileformats.medimage_mrtrix3 import ImageIn, ImageOut
 
 
 # =============================================================================
@@ -1554,7 +1556,189 @@ def cleanup_tmp(sentinel: str, tmp_dir: str, keep_tmp: bool) -> str:
 
 
 # =============================================================================
-# Per-DWI workflow builder
+# DWISeriesWorkflow — canonical @workflow.define for a single DWI series
+# =============================================================================
+
+
+@workflow.define(outputs=["t1_in_dwi", "adc", "fa", "dwi_preproc"])
+def DWISeriesWorkflow(
+    t1w: NiftiGz,
+    dwi: ImageIn,
+    dwi_pe_dir: str,
+    preproc_mode: str,
+    rpe: ImageIn | None = None,
+    fwd_b0: NiftiGz | None = None,
+    readout_time: float = 0.05,
+    eddy_options: str = " --slm=linear",
+    denoise_degibbs: bool = False,
+    gradcheck: bool = False,
+) -> tuple[NiftiGz, NiftiGz, NiftiGz, ImageOut]:
+    """End-to-end DWI preprocessing + T1 coregistration + tensor metrics.
+
+    Inputs are concrete typed fileformats objects — directory scanning and
+    series classification happen in the CLI before this workflow is instantiated.
+    Conditional branches (``denoise_degibbs``, ``gradcheck``, ``preproc_mode``)
+    are evaluated at graph-construction time using the concrete values provided.
+    """
+    from pydra.tasks.mrtrix3.v3_1 import (
+        DwiDenoise,
+        DwiFslpreproc,
+        DwiBiascorrect_Ants,
+        Dwi2Mask_Fslbet,
+        DwiExtract,
+        MrMath,
+        MrConvert,
+        Dwi2Tensor,
+        Tensor2Metric,
+        DwiGradcheck,
+        MrDegibbs,
+    )
+    from pydra.tasks.fsl.v6 import FLIRT, ConvertXFM
+    from phantomkit.tasks.ants import DwiCatMulti
+
+    # ── Optional gradient-table correction ───────────────────────────────────
+    if gradcheck:
+        gc = workflow.add(
+            DwiGradcheck(in_file=dwi, export_grad_mrtrix=True),
+            name="gradcheck",
+        )
+        # Re-embed corrected gradient orientations into a new MIF
+        dwi_in = workflow.add(
+            MrConvert(in_file=dwi, grad=gc.export_grad_mrtrix),
+            name="embed_corrected_grads",
+        ).out_file
+    else:
+        dwi_in = dwi
+
+    # ── Optional denoise + Gibbs ringing removal ──────────────────────────────
+    if denoise_degibbs:
+        dn = workflow.add(DwiDenoise(dwi=dwi_in), name="denoise")
+        dg = workflow.add(MrDegibbs(in_=dn.out), name="degibbs")
+        dwi_for_preproc = dg.out
+        if rpe is not None and preproc_mode == "rpe_all":
+            dn_rpe = workflow.add(DwiDenoise(dwi=rpe), name="denoise_rpe")
+            dg_rpe = workflow.add(MrDegibbs(in_=dn_rpe.out), name="degibbs_rpe")
+            rpe_for_preproc = dg_rpe.out
+        else:
+            rpe_for_preproc = rpe
+    else:
+        dwi_for_preproc = dwi_in
+        rpe_for_preproc = rpe
+
+    # ── dwifslpreproc (phase-encoding correction) ─────────────────────────────
+    if preproc_mode == "rpe_all" and rpe is not None:
+        cat = workflow.add(
+            DwiCatMulti(inputs=[dwi_for_preproc, rpe_for_preproc]),
+            name="concat_ap_pa",
+        )
+        preproc = workflow.add(
+            DwiFslpreproc(
+                in_file=cat.out_file,
+                pe_dir=dwi_pe_dir,
+                rpe_all=True,
+                readout_time=readout_time,
+                eddy_options=eddy_options,
+            ),
+            name="preproc",
+        )
+    elif preproc_mode in ("rpe_pair", "rpe_split") and rpe is not None:
+        # Build the spin-echo EPI pair from the RPE b0 (+ optional fwd b0)
+        rpe_b0 = workflow.add(
+            DwiExtract(in_file=rpe, bzero=True), name="rpe_b0_extract"
+        )
+        if fwd_b0 is not None:
+            fwd_as_mif = workflow.add(
+                MrConvert(in_file=fwd_b0), name="fwd_b0_to_mif"
+            )
+            se_epi = workflow.add(
+                DwiCatMulti(inputs=[fwd_as_mif.out_file, rpe_b0.out_file]),
+                name="se_epi_pair",
+            ).out_file
+        else:
+            se_epi = rpe_b0.out_file
+        preproc = workflow.add(
+            DwiFslpreproc(
+                in_file=dwi_for_preproc,
+                pe_dir=dwi_pe_dir,
+                rpe_pair=True,
+                se_epi=se_epi,
+                readout_time=readout_time,
+                eddy_options=eddy_options,
+            ),
+            name="preproc",
+        )
+    else:  # rpe_none
+        preproc = workflow.add(
+            DwiFslpreproc(
+                in_file=dwi_for_preproc,
+                pe_dir=dwi_pe_dir,
+                rpe_none=True,
+                eddy_options=eddy_options,
+            ),
+            name="preproc",
+        )
+
+    # ── Brain mask + bias field correction ───────────────────────────────────
+    mask = workflow.add(
+        Dwi2Mask_Fslbet(in_file=preproc.out_file), name="mask"
+    )
+    biascorr = workflow.add(
+        DwiBiascorrect_Ants(in_file=preproc.out_file, mask=mask.out_file),
+        name="biascorr",
+    )
+
+    # ── Extract mean b0 → NIfTI for FLIRT ────────────────────────────────────
+    b0_vols = workflow.add(
+        DwiExtract(in_file=biascorr.out_file, bzero=True), name="b0_extract"
+    )
+    b0_mean = workflow.add(
+        MrMath(in_file=b0_vols.out_file, operation="mean", axis=3), name="b0_mean"
+    )
+    b0_nii = workflow.add(
+        MrConvert(in_file=b0_mean.out_file, out_file="b0_mean.nii.gz"),
+        name="b0_to_nii",
+    )
+
+    # ── T1 → DWI space coregistration (FLIRT rigid, 6 DOF) ───────────────────
+    b0_to_t1 = workflow.add(
+        FLIRT(in_file=b0_nii.out_file, reference=t1w, dof=6), name="b0_to_t1"
+    )
+    inv_xfm = workflow.add(
+        ConvertXFM(in_file=b0_to_t1.out_matrix_file, invert_xfm=True),
+        name="invert_xfm",
+    )
+    t1_in_dwi = workflow.add(
+        FLIRT(
+            in_file=t1w,
+            reference=b0_nii.out_file,
+            apply_xfm=True,
+            in_matrix_file=inv_xfm.out_file,
+        ),
+        name="t1_to_dwi",
+    )
+
+    # ── Diffusion tensor + metrics ────────────────────────────────────────────
+    tensor = workflow.add(Dwi2Tensor(dwi=biascorr.out_file), name="tensor")
+    metrics = workflow.add(
+        Tensor2Metric(tensor=tensor.dt, adc=True, fa=True), name="metrics"
+    )
+    adc_nii = workflow.add(
+        MrConvert(in_file=metrics.adc, out_file="ADC.nii.gz"), name="adc_to_nii"
+    )
+    fa_nii = workflow.add(
+        MrConvert(in_file=metrics.fa, out_file="FA.nii.gz"), name="fa_to_nii"
+    )
+
+    return (
+        t1_in_dwi.out_file,
+        adc_nii.out_file,
+        fa_nii.out_file,
+        biascorr.out_file,
+    )
+
+
+# =============================================================================
+# Per-DWI workflow builder (legacy path — kept for backward compat)
 # =============================================================================
 
 
@@ -1999,14 +2183,9 @@ def build_dwi_workflow(plan: dict):
     DwiWf.__name__ = wf_class_name
     DwiWf.__qualname__ = wf_class_name
 
-    # ── Submit ────────────────────────────────────────────────────────────────
     cache_dir = str(Path(out_dir) / ".pydra_cache")
     wf = DwiWf(x=1)
-    with Submitter(worker="cf", cache_root=cache_dir) as sub:
-        sub(wf, rerun=True)
-
-    # Cleanup runs after submission completes — guaranteed post-copy
-    cleanup_tmp(sentinel="", tmp_dir=tmp_dir, keep_tmp=keep_tmp)
+    return wf, cache_dir, tmp_dir, keep_tmp
 
 
 # =============================================================================
@@ -2090,7 +2269,10 @@ def run_pipeline(cfg: dict):
     print_plan(plans, classified["skipped"])
 
     for plan in plans:
-        build_dwi_workflow(plan)
+        wf, cache_dir, tmp_dir, keep_tmp = build_dwi_workflow(plan)
+        with Submitter(worker="cf", cache_root=cache_dir) as sub:
+            sub(wf, rerun=True)
+        cleanup_tmp(sentinel="", tmp_dir=tmp_dir, keep_tmp=keep_tmp)
 
     print("\n=== All done ===")
     print(f"Outputs in: {Path(output_dir).resolve()}")

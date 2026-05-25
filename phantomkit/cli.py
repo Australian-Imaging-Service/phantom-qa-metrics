@@ -370,7 +370,7 @@ def view_mri(nifti_image: str, vials_dir: str | None, title: str, port: int) -> 
     "--denoise-degibbs",
     is_flag=True,
     default=False,
-    help="Apply dwidenoise + mrdegibbs before preprocessing.",
+    help="Apply dwidenoise + mrdegibbs before DWI preprocessing.",
 )
 @click.option(
     "--gradcheck",
@@ -397,6 +397,13 @@ def view_mri(nifti_image: str, vials_dir: str | None, title: str, port: int) -> 
     help="Override FSL eddy options string.",
 )
 @click.option(
+    "--worker",
+    type=click.Choice(["cf", "serial"]),
+    default="cf",
+    show_default=True,
+    help="Pydra worker type for workflow submission.",
+)
+@click.option(
     "--dry-run",
     is_flag=True,
     default=False,
@@ -411,120 +418,229 @@ def run_pipeline(
     nocleanup,
     readout_time,
     eddy_options,
+    worker,
     dry_run,
 ):
     """Run the end-to-end phantom QC + DWI processing pipeline.
 
-    Orchestrates DWI preprocessing (Stage 1), phantom QC in DWI space
-    (Stage 2), and phantom QC on native T1/IR/TE contrasts (Stage 3).
-    Stages 1 and 3 run in parallel; Stage 2 follows Stage 1.
-
-    INPUT_DIR should contain acquisition subdirectories (DICOM folders).
+    Scans INPUT_DIR for acquisition subdirectories (DICOM folders), classifies
+    DWI and T1 series, builds typed scan objects, then submits one
+    ``PhantomKitWorkflow`` per DWI series via pydra.  Native contrast phantom
+    QC (Stage 3) continues to use the legacy ``pipeline.py`` path until
+    ``PhantomSessionWf`` gains typed file outputs for direct workflow
+    integration.
     """
-    import sys
-    from pathlib import Path
-    from phantomkit.pipeline import (
-        scan_input_dir,
-        validate_inputs,
-        run_stage1,
-        run_stage2,
-        run_stage3,
-        print_header,
-        TEMPLATE_DATA_ROOT,
-    )
+    import subprocess
     import concurrent.futures
     import threading
 
-    # Build a minimal args-like namespace so validate_inputs() can be reused
-    class _Args:
-        pass
+    from fileformats.medimage import NiftiGz
+    from fileformats.medimage_mrtrix3 import ImageFormatGz
+    from pydra.engine import Submitter
 
-    _args = _Args()
-    _args.input_dir = input_dir
-    _args.output_dir = output_dir
-    _args.phantom = phantom
-
-    validate_inputs(_args)
+    from phantomkit.pipeline import (
+        validate_inputs,
+        run_stage2,
+        run_stage3,
+        scan_input_dir,
+        print_header,
+        TEMPLATE_DATA_ROOT,
+    )
+    from phantomkit.dwi_processing import (
+        scan_directory,
+        convert_all_candidates,
+        classify_candidates,
+        match_ap_pa_pairs,
+        build_pe_assignment_map,
+        plan_workflow,
+        print_plan,
+        convert_series_to_nii,
+    )
+    from phantomkit.pydra_workflow import PhantomKitWorkflow
 
     input_path = Path(input_dir).resolve()
     output_path = Path(output_dir).resolve()
     template_dir = TEMPLATE_DATA_ROOT / phantom
 
+    validate_inputs(input_path, phantom)
     output_path.mkdir(parents=True, exist_ok=True)
 
-    dwi_cfg = {
+    cfg = {
+        "scans_dir": str(input_path),
+        "output_dir": str(output_path),
         "denoise_degibbs": denoise_degibbs,
         "gradcheck": gradcheck,
-        "nocleanup": nocleanup,
+        "keep_tmp": nocleanup,
         "readout_time": readout_time,
-        "eddy_options": eddy_options,
+        "eddy_options": eddy_options or " --slm=linear",
     }
 
+    # ── Directory scan & series classification ───────────────────────────────
     print_header("Input Directory Scan")
+    dirs = scan_directory(str(input_path))
     scan_info = scan_input_dir(input_path)
 
-    run_stage1_flag = scan_info["has_dwi"]
-    run_stage3_flag = bool(scan_info["t1_dirs"]) and (
-        scan_info["has_native_contrasts"] or not run_stage1_flag
+    has_dwi = bool(dirs["candidate_dwi"])
+    has_native = bool(scan_info.get("t1_dirs")) and (
+        scan_info.get("has_native_contrasts") or not has_dwi
     )
 
+    # ── DWI processing (Stages 1+2) ──────────────────────────────────────────
+    dwi_output_dirs: list[Path] = []
+    stage1_error = stage3_error = None
     _print_lock = threading.Lock()
 
-    def _locked_header(title):
-        with _print_lock:
-            print_header(title)
-
-    dwi_output_dirs = []
-    stage1_error = stage3_error = None
-
-    def _s1():
+    def _run_dwi_stages():
         nonlocal dwi_output_dirs, stage1_error
         try:
-            if run_stage1_flag:
-                dwi_output_dirs[:] = run_stage1(
-                    input_path, output_path, dwi_cfg, dry_run
+            if not has_dwi:
+                with _print_lock:
+                    print_header("STAGE 1 — DWI Processing")
+                    print("  Skipped: no DWI acquisitions found.\n")
+                return
+
+            print_header("STAGE 1 — DWI Processing")
+            print(f"  Converting {len(dirs['candidate_dwi'])} candidate series…")
+            conversions = convert_all_candidates(dirs["candidate_dwi"], str(output_path))
+            classified = classify_candidates(dirs["candidate_dwi"], conversions)
+
+            conversions["fwd_pe_dirs"] = classified["fwd_pe_dirs"]
+            conversions["rpe_dirs"] = classified["rpe_dirs"]
+            dwi_dirs, fwd_pe_dirs, rpe_dirs, rpe_all_map, _ = match_ap_pa_pairs(
+                classified["dwi_dirs"],
+                classified["pending_fwd"],
+                classified["pending_rpe"],
+                conversions,
+            )
+            pe_assignment_map = build_pe_assignment_map(
+                dwi_dirs, fwd_pe_dirs, rpe_dirs, rpe_all_map
+            )
+
+            if not dwi_dirs:
+                print("  No processable DWI series found — skipping.\n")
+                return
+
+            plans = [
+                plan_workflow(
+                    dwi_dir=dwi_dir,
+                    t1_dirs=dirs["t1_dirs"],
+                    fwd_pe_dirs=fwd_pe_dirs,
+                    rpe_dirs=rpe_dirs,
+                    rpe_all_map=rpe_all_map,
+                    pe_assignment_map=pe_assignment_map,
+                    conversions=conversions,
+                    cfg=cfg,
                 )
-            else:
-                _locked_header("STAGE 1 — DWI Processing")
-                print("  Skipped: no DWI acquisitions found.\n")
+                for dwi_dir in dwi_dirs
+            ]
+            print_plan(plans, classified["skipped"])
+
+            if dry_run:
+                print("  [DRY RUN] Skipping workflow execution.\n")
+                return
+
+            for plan in plans:
+                series_name = plan["dwi_name"]
+                series_out = output_path / series_name
+                series_tmp = series_out / "tmp"
+                series_tmp.mkdir(parents=True, exist_ok=True)
+
+                # ── Convert T1 series dir to NiftiGz ─────────────────────────
+                t1_conv = convert_series_to_nii(
+                    plan["t1_dir"], str(series_tmp / "t1_nii")
+                )
+                t1w = NiftiGz(t1_conv["nii"])
+
+                # ── Convert DWI NIfTI + grad files to MIF ────────────────────
+                dwi_mif_path = str(series_tmp / f"DWI_raw_{plan['pe_dir']}.mif.gz")
+                _mif_cmd = [
+                    "mrconvert", plan["dwi_nii"], dwi_mif_path,
+                    "-fslgrad", plan["dwi_bvec"], plan["dwi_bval"],
+                ]
+                if plan.get("dwi_json"):
+                    _mif_cmd += ["-json_import", plan["dwi_json"]]
+                subprocess.run(_mif_cmd, check=True)
+                dwi = ImageFormatGz(dwi_mif_path)
+
+                # ── Convert RPE NIfTI to MIF (if applicable) ─────────────────
+                rpe_img = None
+                if plan.get("rpe_nii"):
+                    rpe_mif_path = str(series_tmp / f"RPE_{plan['rpe_dir']}.mif.gz")
+                    _rpe_cmd = [
+                        "mrconvert", plan["rpe_nii"], rpe_mif_path,
+                        "-fslgrad", plan["rpe_bvec"], plan["rpe_bval"],
+                    ]
+                    if plan.get("rpe_json"):
+                        _rpe_cmd += ["-json_import", plan["rpe_json"]]
+                    subprocess.run(_rpe_cmd, check=True)
+                    rpe_img = ImageFormatGz(rpe_mif_path)
+
+                # ── Forward b0 (rpe_pair only) ────────────────────────────────
+                fwd_b0_img = None
+                if plan.get("fwd_pe_nii"):
+                    fwd_b0_img = NiftiGz(plan["fwd_pe_nii"])
+
+                # ── Build and submit PhantomKitWorkflow ──────────────────────
+                wf = PhantomKitWorkflow(
+                    t1w=t1w,
+                    phantom=phantom,
+                    dwi=dwi,
+                    dwi_pe_dir=plan["pe_dir"],
+                    preproc_mode=plan["preproc_mode"],
+                    rpe=rpe_img,
+                    fwd_b0=fwd_b0_img,
+                    readout_time=plan["readout_time"],
+                    eddy_options=plan["eddy_options"],
+                    denoise_degibbs=denoise_degibbs,
+                    gradcheck=gradcheck,
+                )
+                cache_dir = str(series_out / ".pydra_cache")
+                with Submitter(worker=worker, cache_root=cache_dir) as sub:
+                    sub(wf, rerun=True)
+
+                dwi_output_dirs.append(series_out)
+
         except Exception as exc:
             stage1_error = exc
 
-    def _s3():
+    def _run_stage3():
         nonlocal stage3_error
         try:
-            if run_stage3_flag:
+            if has_native:
                 run_stage3(input_path, output_path, template_dir, scan_info, dry_run)
             else:
-                _locked_header("STAGE 3 — Phantom QC on Native Contrasts")
-                print("  Skipped.\n")
+                with _print_lock:
+                    print_header("STAGE 3 — Phantom QC on Native Contrasts")
+                    print("  Skipped.\n")
         except Exception as exc:
             stage3_error = exc
 
+    # Stages 1 and 3 run in parallel
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-        concurrent.futures.wait([executor.submit(_s1), executor.submit(_s3)])
+        concurrent.futures.wait(
+            [executor.submit(_run_dwi_stages), executor.submit(_run_stage3)]
+        )
 
     if stage1_error:
         raise click.ClickException(f"Stage 1 failed: {stage1_error}")
     if stage3_error:
         raise click.ClickException(f"Stage 3 failed: {stage3_error}")
 
-    if run_stage1_flag:
+    # Stage 2: phantom QC in DWI space (sequential — needs Stage 1 outputs)
+    if dwi_output_dirs:
         run_stage2(dwi_output_dirs, output_path, template_dir, dry_run)
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")
 
-    # Remove staging-only DWI directories (contain only tmp/, no final outputs).
-    # These are created by convert_all_candidates for candidate series that were
-    # not selected as the main DWI output (e.g. RPE pair b=0 volumes).
-    if run_stage1_flag and not nocleanup:
+    # Remove staging-only DWI directories (contain only tmp/, no final outputs)
+    if has_dwi and not nocleanup:
         _t1_markers = {"T1_in_DWI_space.nii.gz", "T1.nii.gz"}
         for d in sorted(output_path.iterdir()):
             if not d.is_dir():
                 continue
             if any((d / m).exists() for m in _t1_markers):
-                continue  # real DWI output dir — leave it alone
+                continue
             if (d / "tmp").exists() and not any(
                 p for p in d.iterdir()
                 if p.name != "tmp" and not p.name.startswith(".")
