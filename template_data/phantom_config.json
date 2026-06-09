@@ -1,4 +1,11 @@
 {
+  "PET": {
+    "Cylinder A": ["A"],
+    "Cylinder B": ["B"],
+    "Cylinder C": ["C"],
+    "Cylinder D": ["D"],
+    "Cylinder E": ["E"]
+  },
   "SPIRIT": {
     "5% Aqueous PVP NiCl2":  ["E"],
     "10% Aqueous PVP NiCl2": ["F"],

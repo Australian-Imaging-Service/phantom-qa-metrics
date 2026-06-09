@@ -589,6 +589,113 @@ def run_stage3(
 
 
 # ---------------------------------------------------------------------------
+# PET stage
+# ---------------------------------------------------------------------------
+
+
+def _find_pet_niftis(input_dir: Path) -> list:
+    """Return all NIfTI files in *input_dir* (flat or one level deep in subdirs)."""
+    found = []
+    for pattern in ("*.nii.gz", "*.nii"):
+        found.extend(sorted(input_dir.glob(pattern)))
+    for sub in sorted(input_dir.iterdir()):
+        if sub.is_dir() and not sub.name.startswith("_"):
+            for pattern in ("*.nii.gz", "*.nii"):
+                found.extend(sorted(sub.glob(pattern)))
+    return found
+
+
+def run_pet_stage(
+    input_dir: Path,
+    output_dir: Path,
+    template_dir: Path,
+    phantom: str,
+    dry_run: bool,
+    input_identifier: str = "",
+) -> None:
+    """Register each PET NIfTI in *input_dir* to the template and generate reports."""
+    print_header("PET STAGE — Registration, Metric Extraction & HTML Report")
+
+    pet_niftis = _find_pet_niftis(input_dir)
+    if not pet_niftis:
+        print("  No NIfTI files found in input directory — nothing to do.\n")
+        return
+
+    print(f"  Found {len(pet_niftis)} PET image(s):")
+    for p in pet_niftis:
+        print(f"    {p}")
+    print()
+
+    from phantomkit.pet_processing import (
+        register_pet_to_template,
+        apply_transform_to_vials,
+        extract_pet_vial_metrics,
+        save_pet_metrics_xlsx,
+    )
+    from phantomkit.plotting.pet_html import plot_pet_vials
+
+    vial_template_dir = str(template_dir / "VialsLabelled")
+
+    for pet_nii in pet_niftis:
+        stem = pet_nii.name
+        for ext in (".nii.gz", ".nii"):
+            if stem.endswith(ext):
+                stem = stem[: -len(ext)]
+                break
+        session = f"{input_identifier}_{stem}" if input_identifier else stem
+        session_out = output_dir / session
+        reg_dir     = session_out / "registration"
+        metrics_dir = session_out / "metrics"
+        xlsx_path   = metrics_dir / "xlsx" / "PET.xlsx"
+        html_path   = metrics_dir / "plots" / "PET.html"
+
+        print(f"  Processing: {pet_nii.name}")
+        print(f"    Output:   {session_out}")
+
+        if dry_run:
+            print("  [DRY RUN] Would run PET registration + metric extraction.\n")
+            continue
+
+        # ── Registration ────────────────────────────────────────────────────
+        print("  Step 1/3: registration")
+        reg = register_pet_to_template(
+            input_image=str(pet_nii),
+            results_dir=str(reg_dir),
+            template_image=str(template_dir / "ImageTemplate.nii.gz"),
+            template_mask=str(template_dir / "ImageTemplate_mask.nii.gz"),
+        )
+
+        # ── Vial transform ──────────────────────────────────────────────────
+        print("  Step 2/3: transforming vial labels to subject space")
+        vials_out = str(session_out / "VialsLabelled")
+        vial_masks = apply_transform_to_vials(
+            vial_dir=vial_template_dir,
+            output_dir=vials_out,
+            reference_image=reg["strides_image"],
+            transform_prefix=reg["transform_prefix"],
+        )
+
+        # ── Metric extraction ───────────────────────────────────────────────
+        print("  Step 3/3: extracting vial metrics")
+        metrics = extract_pet_vial_metrics(reg["strides_image"], vial_masks)
+        save_pet_metrics_xlsx(metrics, str(xlsx_path))
+        print(f"    Metrics saved: {xlsx_path}")
+
+        # ── HTML report ─────────────────────────────────────────────────────
+        html_path.parent.mkdir(parents=True, exist_ok=True)
+        plot_pet_vials(
+            xlsx_path=str(xlsx_path),
+            output=str(html_path),
+            phantom=phantom,
+            nifti_image=reg["strides_image"],
+            vial_niftis=vial_masks,
+        )
+        print(f"    HTML report:  {html_path}\n")
+
+    print("  PET stage complete.\n")
+
+
+# ---------------------------------------------------------------------------
 # Validation
 # ---------------------------------------------------------------------------
 
@@ -668,6 +775,21 @@ def run_full_pipeline(
 
     n_threads = os.cpu_count() or 1
     os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", str(n_threads))
+
+    # PET uses its own self-contained stage — skip all MRI stages.
+    if phantom == "PET":
+        input_dir = _wrap_flat_inputs(input_dir, output_dir)
+        run_pet_stage(
+            input_dir=input_dir,
+            output_dir=output_dir,
+            template_dir=template_dir,
+            phantom=phantom,
+            dry_run=dry_run,
+            input_identifier=input_identifier,
+        )
+        print_header("Pipeline Complete")
+        print(f"  All outputs written to: {output_dir}\n")
+        return output_dir
 
     input_dir = _wrap_flat_inputs(input_dir, output_dir)
 
