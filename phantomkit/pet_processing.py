@@ -294,12 +294,16 @@ def run_pet_pipeline(
 
 
 def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
-    """Extract per-vial statistics from a PET image using binary vial masks.
+    """Extract per-vial statistics from a PET image using mrstats / mrdump.
+
+    Matches the extraction approach used by PhantomProcessor for all other
+    modalities: ``mrstats`` provides mean/median/std/min/max/count and
+    ``mrdump`` provides p25/p75/mean_mad/median_mad.
 
     Parameters
     ----------
     pet_image:
-        Path to the PET NIfTI image (strides-matched or warped).
+        Path to the PET NIfTI image (strides-matched, in subject space).
     vial_masks:
         ``{vial_name: mask_path}`` as returned by :func:`apply_transform_to_vials`.
 
@@ -309,40 +313,72 @@ def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
         ``{vial_name: {mean, std, median, max, min, count, p25, p75,
                         mean_mad, median_mad}}``
     """
-    import nibabel as nib
     import numpy as np
 
-    pet_data = nib.load(pet_image).get_fdata(dtype=np.float32)
-
+    nan = float("nan")
     metrics: dict = {}
+
     for vial_name, mask_path in sorted(vial_masks.items()):
-        mask_data = nib.load(mask_path).get_fdata(dtype=np.float32)
-        voxels = pet_data[mask_data > 0.5]
-        if voxels.size == 0:
-            print(f"  WARNING: vial {vial_name} mask is empty — skipping.")
+        # ── mrstats: mean / median / std / min / max / count ─────────────────
+        result = subprocess.run(
+            [
+                "mrstats", "-quiet", str(pet_image),
+                "-output", "mean",
+                "-output", "median",
+                "-output", "std",
+                "-output", "min",
+                "-output", "max",
+                "-output", "count",
+                "-mask", str(mask_path),
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode != 0 or not result.stdout.strip():
+            print(f"  WARNING: mrstats failed for vial {vial_name} — skipping.")
+            print(f"    stderr: {result.stderr.strip()}")
             continue
-        mean_val = float(np.mean(voxels))
-        median_val = float(np.median(voxels))
+
+        vals = result.stdout.strip().split()
+        mean_val   = float(vals[0])
+        median_val = float(vals[1])
+
+        # ── mrdump: p25 / p75 / mean_mad / median_mad ────────────────────────
+        p25 = p75 = mean_mad = median_mad = nan
+        try:
+            dump = subprocess.run(
+                ["mrdump", str(pet_image), "-mask", str(mask_path)],
+                capture_output=True, text=True, check=True,
+            )
+            raw = np.array([float(x) for x in dump.stdout.strip().split()])
+            if raw.size:
+                p25        = float(np.percentile(raw, 25))
+                p75        = float(np.percentile(raw, 75))
+                mean_mad   = float(np.mean(np.abs(raw - raw.mean())))
+                median_mad = float(np.median(np.abs(raw - np.median(raw))))
+        except Exception as exc:
+            print(f"  WARNING: mrdump failed for vial {vial_name}: {exc}")
+
         metrics[vial_name] = {
             "mean":       mean_val,
-            "std":        float(np.std(voxels)),
             "median":     median_val,
-            "max":        float(np.max(voxels)),
-            "min":        float(np.min(voxels)),
-            "count":      int(voxels.size),
-            "p25":        float(np.percentile(voxels, 25)),
-            "p75":        float(np.percentile(voxels, 75)),
-            "mean_mad":   float(np.mean(np.abs(voxels - mean_val))),
-            "median_mad": float(np.median(np.abs(voxels - median_val))),
+            "std":        float(vals[2]),
+            "min":        float(vals[3]),
+            "max":        float(vals[4]),
+            "count":      float(vals[5]),
+            "p25":        p25,
+            "p75":        p75,
+            "mean_mad":   mean_mad,
+            "median_mad": median_mad,
         }
+
     return metrics
 
 
 def save_pet_metrics_xlsx(metrics: dict, output_path: str) -> None:
     """Write per-vial PET metrics to an xlsx file, one sheet per statistic.
 
-    The layout matches the format expected by :func:`plot_pet_vials`:
-    each sheet has a ``vial`` column and a single ``value`` column.
+    Layout matches the PhantomProcessor xlsx format: each sheet has a
+    ``vial`` column and a ``vol0`` column (single PET volume).
 
     Parameters
     ----------
@@ -354,16 +390,16 @@ def save_pet_metrics_xlsx(metrics: dict, output_path: str) -> None:
     import pandas as pd
 
     vials = sorted(metrics.keys())
-    sheets = [
-        "mean", "std", "median", "max", "min",
+    sheet_order = [
+        "mean", "median", "std", "min", "max",
         "count", "p25", "p75", "mean_mad", "median_mad",
     ]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with pd.ExcelWriter(output_path, engine="openpyxl") as writer:
-        for sheet in sheets:
+        for sheet in sheet_order:
             df = pd.DataFrame({
-                "vial":  vials,
-                "value": [metrics[v][sheet] for v in vials],
+                "vial": vials,
+                "vol0": [metrics[v][sheet] for v in vials],
             })
             df.to_excel(writer, sheet_name=sheet, index=False)

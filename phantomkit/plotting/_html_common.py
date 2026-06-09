@@ -527,7 +527,7 @@ def _niivue_viewer_panel(
     )
     html_panel = f"""<div class="chart-card" style="margin-bottom:20px;">
   <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;">
-    <p class="chart-title" style="margin:0;">MRI Viewer</p>
+    <p class="chart-title" style="margin:0;">Image Viewer</p>
     <div style="display:flex;gap:6px;align-items:center;">
       {overlay_btn_html}
       <button onclick="pkZoom(1.25)" style="{_zoom_btn_style}">+</button>
