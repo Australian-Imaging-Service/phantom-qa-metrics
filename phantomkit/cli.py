@@ -430,6 +430,17 @@ def run_pipeline(
     ``PhantomSessionWf`` gains typed file outputs for direct workflow
     integration.
     """
+    # PET uses its own dedicated stage — bypass all DWI/MRtrix imports.
+    if phantom == "PET":
+        from phantomkit.pipeline import run_full_pipeline
+        run_full_pipeline(
+            input_dir=Path(input_dir).resolve(),
+            output_dir=Path(output_dir).resolve(),
+            phantom=phantom,
+            dry_run=dry_run,
+        )
+        return
+
     import subprocess
     import concurrent.futures
     import threading

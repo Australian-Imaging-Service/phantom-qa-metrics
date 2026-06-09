@@ -212,6 +212,7 @@ def build_pet_html(
         viewer_html, viewer_js = _niivue_viewer_panel(
             nifti_image,  # type: ignore[arg-type]
             vial_niftis or {},
+            bg_colormap="pet",
         )
     else:
         viewer_html = viewer_js = ""

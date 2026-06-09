@@ -734,6 +734,18 @@ def validate_inputs(input_dir: Path, phantom: str) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _cleanup_staged_input(output_dir: Path, dry_run: bool = False) -> None:
+    """Remove output_dir/_staged_input/ if it was created by _wrap_flat_inputs."""
+    staged = output_dir / "_staged_input"
+    if not staged.exists():
+        return
+    if dry_run:
+        print(f"  [DRY RUN] Would remove staging directory: {staged.name}")
+        return
+    shutil.rmtree(staged)
+    print(f"  Removed staging directory: {staged.name}")
+
+
 def _cleanup_tmp_only_dirs(output_dir: Path) -> None:
     """Remove subdirectories of output_dir that contain only tmp-like directories."""
     _tmp_pattern = re.compile(r"^(tmp|\.pydra)", re.IGNORECASE)
@@ -787,6 +799,7 @@ def run_full_pipeline(
             dry_run=dry_run,
             input_identifier=input_identifier,
         )
+        _cleanup_staged_input(output_dir, dry_run)
         print_header("Pipeline Complete")
         print(f"  All outputs written to: {output_dir}\n")
         return output_dir
@@ -884,9 +897,10 @@ def run_full_pipeline(
         print_header("STAGE 4 — Calibration Temperature Estimation")
         print("  Skipped: no DWI acquisitions found.\n")
 
-    # ── Cleanup tmp-only directories ─────────────────────────────────────────
+    # ── Cleanup tmp-only and staged-input directories ────────────────────────
     if not dry_run:
         _cleanup_tmp_only_dirs(output_dir)
+        _cleanup_staged_input(output_dir, dry_run)
 
     # ── Summary ───────────────────────────────────────────────────────────────
     print_header("Pipeline Complete")
