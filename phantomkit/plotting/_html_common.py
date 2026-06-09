@@ -446,7 +446,6 @@ def _niivue_viewer_panel(
     bg_cal_max: float | None = None,
     overlay_nifti: str | None = None,
     overlay_label: str = "Contrast",
-    bg_colormap: str = "gray",
 ) -> tuple[str, str]:
     """Build an embedded NiiVue viewer panel for a static HTML page.
 
@@ -597,7 +596,7 @@ function _pkInitNv(canvas, w, h) {{
   }});
   window._pkNv.attachToCanvas(canvas);
   window._pkNv.opts.sliceType = 3;
-  var vols = [{{url: _pkB64ToUrl(_NV_BG), name: "background.nii.gz", colormap: "{bg_colormap}"}}];
+  var vols = [{{url: _pkB64ToUrl(_NV_BG), name: "background.nii.gz", colormap: "gray"}}];
   for (var i = 0; i < _NV_VIALS.length; i++) {{
     vols.push({{
       url: _pkB64ToUrl(_NV_VIALS[i].b64),
