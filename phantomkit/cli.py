@@ -37,7 +37,11 @@ def _discover_protocols() -> dict[str, tuple]:
     for info in pkgutil.iter_modules(phantomkit.analyses.__path__):
         if info.name.startswith("_"):
             continue
-        mod = importlib.import_module(f"phantomkit.analyses.{info.name}")
+        try:
+            mod = importlib.import_module(f"phantomkit.analyses.{info.name}")
+        except Exception as exc:
+            logger.debug("Skipping protocol module %s: %s", info.name, exc)
+            continue
         for attr_name, obj in vars(mod).items():
             if attr_name.startswith("_") or not attr_name.endswith("Analysis"):
                 continue
@@ -292,7 +296,11 @@ def _register_plot_commands() -> None:
     for info in pkgutil.iter_modules(_pkg.__path__):
         if info.name.startswith("_"):
             continue
-        mod = importlib.import_module(f"phantomkit.plotting.{info.name}")
+        try:
+            mod = importlib.import_module(f"phantomkit.plotting.{info.name}")
+        except Exception as exc:
+            logger.debug("Skipping plot module %s: %s", info.name, exc)
+            continue
         cmd = getattr(mod, "main", None)
         if isinstance(cmd, (click.Command, click.Group)):
             plot.add_command(cmd, name=info.name.replace("_", "-"))
@@ -367,10 +375,14 @@ def view_mri(nifti_image: str, vials_dir: str | None, title: str, port: int) -> 
     help="Phantom name, e.g. SPIRIT. Used to locate template_data/<phantom>/.",
 )
 @click.option(
-    "--denoise-degibbs",
-    is_flag=True,
-    default=False,
-    help="Apply dwidenoise + mrdegibbs before DWI preprocessing.",
+    "--processing-steps",
+    default="",
+    help=(
+        "Comma-separated DWI processing steps to run. "
+        "Valid values: dwidenoise, mrgibbs, dwifslpreproc, dwibiascorrect. "
+        "Example: --processing-steps dwidenoise,mrgibbs,dwifslpreproc,dwibiascorrect. "
+        "Default: none (only tensor fitting is performed)."
+    ),
 )
 @click.option(
     "--gradcheck",
@@ -413,7 +425,7 @@ def run_pipeline(
     input_dir,
     output_dir,
     phantom,
-    denoise_degibbs,
+    processing_steps,
     gradcheck,
     nocleanup,
     readout_time,
@@ -480,10 +492,19 @@ def run_pipeline(
     n_threads = _os.cpu_count() or 1
     _os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", str(n_threads))
 
+    _valid_steps = {"dwidenoise", "mrgibbs", "dwifslpreproc", "dwibiascorrect"}
+    _parsed_steps = [s.strip() for s in processing_steps.split(",") if s.strip()]
+    _invalid = [s for s in _parsed_steps if s not in _valid_steps]
+    if _invalid:
+        raise click.UsageError(
+            f"Unknown --processing-steps value(s): {', '.join(_invalid)}. "
+            f"Valid options: {', '.join(sorted(_valid_steps))}"
+        )
+
     cfg = {
         "scans_dir": str(input_path),
         "output_dir": str(output_path),
-        "denoise_degibbs": denoise_degibbs,
+        "processing_steps": _parsed_steps,
         "gradcheck": gradcheck,
         "keep_tmp": nocleanup,
         "readout_time": readout_time,
@@ -608,7 +629,7 @@ def run_pipeline(
                     fwd_b0=fwd_b0_img,
                     readout_time=plan["readout_time"],
                     eddy_options=plan["eddy_options"],
-                    denoise_degibbs=denoise_degibbs,
+                    processing_steps=_parsed_steps,
                     gradcheck=gradcheck,
                 )
                 cache_dir = str(series_out / ".pydra_cache")

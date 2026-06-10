@@ -152,7 +152,7 @@ def PhantomKitWorkflow(
     fwd_b0: NiftiGz | None = None,
     readout_time: float | None = None,
     eddy_options: str | None = None,
-    denoise_degibbs: bool = False,
+    processing_steps: list[str] | None = None,
     gradcheck: bool = False,
 ) -> tuple[NiftiGz | None, NiftiGz | None, NiftiGz | None, ImageOut | None]:
     """End-to-end PhantomKit MRI phantom QA workflow.
@@ -183,7 +183,7 @@ def PhantomKitWorkflow(
                 fwd_b0=fwd_b0,
                 readout_time=readout_time if readout_time is not None else 0.05,
                 eddy_options=eddy_options if eddy_options is not None else " --slm=linear",
-                denoise_degibbs=denoise_degibbs,
+                processing_steps=processing_steps,
                 gradcheck=gradcheck,
             ),
             name="dwi_processing",

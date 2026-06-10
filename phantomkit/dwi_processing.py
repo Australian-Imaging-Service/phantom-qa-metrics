@@ -1079,16 +1079,21 @@ def plan_workflow(
         readout_time = 0.0342002
         readout_time_source = "fallback (no JSON found)"
 
-    do_denoise = cfg.get("denoise_degibbs", False)
+    processing_steps = cfg.get("processing_steps", [])
     do_gradcheck = cfg.get("gradcheck", False)
     eddy_options = cfg.get("eddy_options", " --slm=linear")
     keep_tmp = cfg.get("keep_tmp", False)
 
-    dwi_preproc_name = (
-        "DWI_denoise_gibbs_preproc_biascorr.mif.gz"
-        if do_denoise
-        else "DWI_preproc_biascorr.mif.gz"
-    )
+    _name_parts = []
+    if "dwidenoise" in processing_steps:
+        _name_parts.append("denoise")
+    if "mrgibbs" in processing_steps:
+        _name_parts.append("gibbs")
+    if "dwifslpreproc" in processing_steps:
+        _name_parts.append("preproc")
+    if "dwibiascorrect" in processing_steps:
+        _name_parts.append("biascorr")
+    dwi_preproc_name = ("DWI_" + "_".join(_name_parts) if _name_parts else "DWI") + ".mif.gz"
 
     # T1 output filename depends on whether registration was performed.
     t1_output_name = "T1_in_DWI_space.nii.gz"
@@ -1122,7 +1127,7 @@ def plan_workflow(
         "preproc_mode": preproc_mode,
         "readout_time": readout_time,
         "readout_time_src": readout_time_source,
-        "do_denoise": do_denoise,
+        "processing_steps": processing_steps,
         "do_gradcheck": do_gradcheck,
         "eddy_options": eddy_options,
         "keep_tmp": keep_tmp,
@@ -1173,7 +1178,19 @@ def print_plan(plans: list, skipped: list):
         print(f"  PE direction:   {pe_str}")
         print(f"  Preproc mode:   {p['preproc_mode']}")
         print(f"  Readout time:   {p['readout_time']} ({p['readout_time_src']})")
-        print(f"  Denoise/Gibbs:  {p['do_denoise']}")
+        _steps = p.get("processing_steps") or []
+        _pipeline = ["raw DWI"]
+        if "dwidenoise" in _steps:
+            _pipeline.append("dwidenoise")
+        if "mrgibbs" in _steps:
+            _pipeline.append("mrgibbs")
+        if "dwifslpreproc" in _steps:
+            _pipeline.append("dwifslpreproc")
+        if "dwibiascorrect" in _steps:
+            _pipeline.append("dwibiascorrect")
+        _pipeline.append("tensor")
+        print(f"  Pipeline:       {' → '.join(_pipeline)}")
+        print(f"  Output MIF:     {p['dwi_preproc_name']}")
         print(f"  Gradcheck:      {p['do_gradcheck']}")
 
         if p["do_gradcheck"]:
@@ -1186,7 +1203,7 @@ def print_plan(plans: list, skipped: list):
                 targets.append("Reverse PE b0")
             print(f"    Gradcheck on: {', '.join(targets)}")
 
-        if p["do_denoise"] and p["preproc_mode"] == "rpe_all":
+        if "dwidenoise" in (p.get("processing_steps") or []) and p["preproc_mode"] == "rpe_all":
             print(
                 f"    Denoise on:   DWI ({p['pe_dir']}) and DWI ({p['rpe_dir']}) separately"
             )
@@ -1689,16 +1706,21 @@ def DWISeriesWorkflow(
     fwd_b0: NiftiGz | None = None,
     readout_time: float = 0.05,
     eddy_options: str = " --slm=linear",
-    denoise_degibbs: bool = False,
+    processing_steps: list[str] | None = None,
     gradcheck: bool = False,
 ) -> tuple[NiftiGz, NiftiGz, NiftiGz, ImageOut]:
     """End-to-end DWI preprocessing + T1 coregistration + tensor metrics.
 
     Inputs are concrete typed fileformats objects — directory scanning and
     series classification happen in the CLI before this workflow is instantiated.
-    Conditional branches (``denoise_degibbs``, ``gradcheck``, ``preproc_mode``)
+    Conditional branches (``processing_steps``, ``gradcheck``, ``preproc_mode``)
     are evaluated at graph-construction time using the concrete values provided.
     """
+    _steps = processing_steps or []
+    do_denoise = "dwidenoise" in _steps
+    do_degibbs = "mrgibbs" in _steps
+    do_fslpreproc = "dwifslpreproc" in _steps
+    do_biascorrect = "dwibiascorrect" in _steps
     from pydra.tasks.mrtrix3.v3_1 import (
         DwiDenoise,
         DwiBiascorrect_Ants,
@@ -1726,94 +1748,110 @@ def DWISeriesWorkflow(
     else:
         dwi_in = dwi
 
-    # ── Optional denoise + Gibbs ringing removal ──────────────────────────────
-    if denoise_degibbs:
+    # ── Optional denoising ────────────────────────────────────────────────────
+    if do_denoise:
         dn = workflow.add(DwiDenoise(dwi=dwi_in), name="denoise")
-        dg = workflow.add(MrDegibbs(in_=dn.out), name="degibbs")
-        dwi_for_preproc = dg.out
+        dwi_after_dn = dn.out
         if rpe is not None and preproc_mode == "rpe_all":
             dn_rpe = workflow.add(DwiDenoise(dwi=rpe), name="denoise_rpe")
-            dg_rpe = workflow.add(MrDegibbs(in_=dn_rpe.out), name="degibbs_rpe")
+            rpe_after_dn = dn_rpe.out
+        else:
+            rpe_after_dn = rpe
+    else:
+        dwi_after_dn = dwi_in
+        rpe_after_dn = rpe
+
+    # ── Optional Gibbs ringing removal ───────────────────────────────────────
+    if do_degibbs:
+        dg = workflow.add(MrDegibbs(in_=dwi_after_dn), name="degibbs")
+        dwi_for_preproc = dg.out
+        if rpe is not None and preproc_mode == "rpe_all":
+            dg_rpe = workflow.add(MrDegibbs(in_=rpe_after_dn), name="degibbs_rpe")
             rpe_for_preproc = dg_rpe.out
         else:
-            rpe_for_preproc = rpe
+            rpe_for_preproc = rpe_after_dn
     else:
-        dwi_for_preproc = dwi_in
-        rpe_for_preproc = rpe
+        dwi_for_preproc = dwi_after_dn
+        rpe_for_preproc = rpe_after_dn
 
-    # ── dwifslpreproc (phase-encoding correction) ─────────────────────────────
-    if preproc_mode == "rpe_all" and rpe is not None:
-        cat = workflow.add(
-            DwiCatMulti(inputs=[dwi_for_preproc, rpe_for_preproc]),
-            name="concat_ap_pa",
-        )
-        preproc = workflow.add(
-            RunDwifslpreproc(
-                in_file=cat.out_file,
-                pe_dir=dwi_pe_dir,
-                preproc_mode="rpe_all",
-                readout_time=readout_time,
-                eddy_options=eddy_options,
-            ),
-            name="preproc",
-        )
-    elif preproc_mode in ("rpe_pair", "rpe_split") and rpe is not None:
-        # Build the spin-echo EPI pair from the RPE b0 (+ optional fwd b0)
-        rpe_b0 = workflow.add(
-            DwiExtract(in_file=rpe, bzero=True), name="rpe_b0_extract"
-        )
-        if fwd_b0 is not None:
-            fwd_as_mif = workflow.add(
-                MrConvert(in_file=fwd_b0), name="fwd_b0_to_mif"
+    # ── Optional dwifslpreproc (phase-encoding correction) ────────────────────
+    if do_fslpreproc:
+        if preproc_mode == "rpe_all" and rpe is not None:
+            cat = workflow.add(
+                DwiCatMulti(inputs=[dwi_for_preproc, rpe_for_preproc]),
+                name="concat_ap_pa",
             )
-            se_epi = workflow.add(
-                DwiCatMulti(inputs=[fwd_as_mif.out_file, rpe_b0.out_file]),
-                name="se_epi_pair",
-            ).out_file
-        else:
-            se_epi = rpe_b0.out_file
-        preproc = workflow.add(
-            RunDwifslpreproc(
-                in_file=dwi_for_preproc,
-                pe_dir=dwi_pe_dir,
-                preproc_mode=preproc_mode,
-                se_epi=se_epi,
-                readout_time=readout_time,
-                eddy_options=eddy_options,
-            ),
-            name="preproc",
-        )
-    else:  # rpe_none
-        preproc = workflow.add(
-            RunDwifslpreproc(
-                in_file=dwi_for_preproc,
-                pe_dir=dwi_pe_dir,
-                preproc_mode="rpe_none",
-                eddy_options=eddy_options,
-            ),
-            name="preproc",
-        )
+            preproc = workflow.add(
+                RunDwifslpreproc(
+                    in_file=cat.out_file,
+                    pe_dir=dwi_pe_dir,
+                    preproc_mode="rpe_all",
+                    readout_time=readout_time,
+                    eddy_options=eddy_options,
+                ),
+                name="preproc",
+            )
+        elif preproc_mode in ("rpe_pair", "rpe_split") and rpe is not None:
+            rpe_b0 = workflow.add(
+                DwiExtract(in_file=rpe, bzero=True), name="rpe_b0_extract"
+            )
+            if fwd_b0 is not None:
+                fwd_as_mif = workflow.add(
+                    MrConvert(in_file=fwd_b0), name="fwd_b0_to_mif"
+                )
+                se_epi = workflow.add(
+                    DwiCatMulti(inputs=[fwd_as_mif.out_file, rpe_b0.out_file]),
+                    name="se_epi_pair",
+                ).out_file
+            else:
+                se_epi = rpe_b0.out_file
+            preproc = workflow.add(
+                RunDwifslpreproc(
+                    in_file=dwi_for_preproc,
+                    pe_dir=dwi_pe_dir,
+                    preproc_mode=preproc_mode,
+                    se_epi=se_epi,
+                    readout_time=readout_time,
+                    eddy_options=eddy_options,
+                ),
+                name="preproc",
+            )
+        else:  # rpe_none
+            preproc = workflow.add(
+                RunDwifslpreproc(
+                    in_file=dwi_for_preproc,
+                    pe_dir=dwi_pe_dir,
+                    preproc_mode="rpe_none",
+                    eddy_options=eddy_options,
+                ),
+                name="preproc",
+            )
+        preproc_out = preproc.out
+    else:
+        preproc_out = dwi_for_preproc
 
     # ── Mean b0 → phantom mask + FLIRT reference ─────────────────────────────
     b0_vols = workflow.add(
-        DwiExtract(in_file=preproc.out, bzero=True), name="b0_extract"
+        DwiExtract(in_file=preproc_out, bzero=True), name="b0_extract"
     )
     b0_mean = workflow.add(
         MrMath(in_file=b0_vols.out_file, operation="mean", axis=3), name="b0_mean"
-    )
-    mask = workflow.add(
-        MrThresholdMask(b0=b0_mean.out_file), name="mask"
     )
     b0_nii = workflow.add(
         MrConvert(in_file=b0_mean.out_file, out_file="b0_mean.nii.gz"),
         name="b0_to_nii",
     )
 
-    # ── Bias field correction ─────────────────────────────────────────────────
-    biascorr = workflow.add(
-        DwiBiascorrect_Ants(in_file=preproc.out, mask=mask.out, config=[]),
-        name="biascorr",
-    )
+    # ── Optional bias field correction ────────────────────────────────────────
+    if do_biascorrect:
+        mask = workflow.add(MrThresholdMask(b0=b0_mean.out_file), name="mask")
+        biascorr = workflow.add(
+            DwiBiascorrect_Ants(in_file=preproc_out, mask=mask.out, config=[]),
+            name="biascorr",
+        )
+        dwi_for_tensor = biascorr.out_file
+    else:
+        dwi_for_tensor = preproc_out
 
     # ── T1 → DWI space coregistration (FLIRT rigid, 6 DOF) ───────────────────
     t1_in_dwi = workflow.add(
@@ -1822,7 +1860,7 @@ def DWISeriesWorkflow(
     )
 
     # ── Diffusion tensor + metrics ────────────────────────────────────────────
-    tensor = workflow.add(Dwi2Tensor(dwi=biascorr.out_file), name="tensor")
+    tensor = workflow.add(Dwi2Tensor(dwi=dwi_for_tensor), name="tensor")
     metrics = workflow.add(
         Tensor2Metric(tensor=tensor.dt, adc="ADC.mif.gz", fa="FA.mif.gz"), name="metrics"
     )
@@ -1839,7 +1877,7 @@ def DWISeriesWorkflow(
         t1_in_dwi.out,
         adc_nii.out_file,
         fa_nii.out_file,
-        biascorr.out_file,
+        dwi_for_tensor,
     )
 
 
@@ -1861,7 +1899,7 @@ def build_dwi_workflow(plan: dict):
     - cache_root is set per-series to <out_dir>/.pydra_cache — isolated,
       avoids cross-series contamination.
     - rerun=True ensures pydra re-executes rather than replaying stale cache.
-    - Conditional branching (preproc_mode, do_denoise, do_gradcheck) is
+    - Conditional branching (preproc_mode, processing_steps, do_gradcheck) is
       resolved at workflow-class-definition time using concrete plan values
       captured in the closure. Each unique combination gets a distinctly-named
       class so pydra's cache correctly distinguishes them.
@@ -1878,7 +1916,11 @@ def build_dwi_workflow(plan: dict):
     pe_dir = plan["pe_dir"]
     rpe_dir = plan["rpe_dir"]
     preproc_mode = plan["preproc_mode"]
-    do_denoise = plan["do_denoise"]
+    processing_steps = plan.get("processing_steps") or []
+    do_denoise = "dwidenoise" in processing_steps
+    do_degibbs = "mrgibbs" in processing_steps
+    do_fslpreproc = "dwifslpreproc" in processing_steps
+    do_biascorrect = "dwibiascorrect" in processing_steps
     do_gradcheck = plan["do_gradcheck"]
     readout_time = plan["readout_time"]
     eddy_options = plan["eddy_options"]
@@ -1931,10 +1973,10 @@ def build_dwi_workflow(plan: dict):
     # ── Workflow class name encodes the branch combination ────────────────────
     # Each unique combination gets a distinct class name so pydra caches them
     # independently. skip_preproc adds an extra tag to distinguish the two paths.
-    dn_tag = "dn" if do_denoise else "nodn"
+    steps_tag = "_".join(sorted(processing_steps)) if processing_steps else "nosteps"
     gc_tag = "gc" if do_gradcheck else "nogc"
     sp_tag = "skippreproc" if skip_preproc else "fullpreproc"
-    wf_class_name = f"DwiWf_{preproc_mode}_{dn_tag}_{gc_tag}_{sp_tag}"
+    wf_class_name = f"DwiWf_{preproc_mode}_{steps_tag}_{gc_tag}_{sp_tag}"
 
     if skip_preproc:
         # ── Reduced workflow: T1 conversion + registration + tensor + copy ───
@@ -2117,7 +2159,7 @@ def build_dwi_workflow(plan: dict):
             else:
                 rpe_mif_out = None
 
-            # ── Denoise + Gibbs ───────────────────────────────────────────────
+            # ── Optional denoising ────────────────────────────────────────────
             if do_denoise:
                 dn_dwi = workflow.add(
                     run_dwidenoise(
@@ -2126,17 +2168,7 @@ def build_dwi_workflow(plan: dict):
                     ),
                     name="denoise_dwi",
                 )
-                dg_dwi = workflow.add(
-                    run_mrdegibbs(
-                        in_mif=dn_dwi.out,
-                        out_mif=str(
-                            Path(tmp_dir) / f"DWI_raw_{pe_dir}_denoise_gibbs.mif.gz"
-                        ),
-                    ),
-                    name="degibbs_dwi",
-                )
-                dwi_for_preproc = dg_dwi.out
-
+                dwi_after_dn = dn_dwi.out
                 if preproc_mode == "rpe_all" and rpe_nii:
                     dn_rpe = workflow.add(
                         run_dwidenoise(
@@ -2147,90 +2179,115 @@ def build_dwi_workflow(plan: dict):
                         ),
                         name="denoise_rpe",
                     )
+                    rpe_after_dn = dn_rpe.out
+                else:
+                    rpe_after_dn = rpe_mif_out
+            else:
+                dwi_after_dn = dwi_mif.out
+                rpe_after_dn = rpe_mif_out
+
+            # ── Optional Gibbs ringing removal ───────────────────────────────
+            if do_degibbs:
+                dg_dwi = workflow.add(
+                    run_mrdegibbs(
+                        in_mif=dwi_after_dn,
+                        out_mif=str(
+                            Path(tmp_dir) / f"DWI_raw_{pe_dir}_gibbs.mif.gz"
+                        ),
+                    ),
+                    name="degibbs_dwi",
+                )
+                dwi_for_preproc = dg_dwi.out
+                if preproc_mode == "rpe_all" and rpe_nii:
                     dg_rpe = workflow.add(
                         run_mrdegibbs(
-                            in_mif=dn_rpe.out,
+                            in_mif=rpe_after_dn,
                             out_mif=str(
-                                Path(tmp_dir)
-                                / f"DWI_raw_{rpe_dir}_denoise_gibbs.mif.gz"
+                                Path(tmp_dir) / f"DWI_raw_{rpe_dir}_gibbs.mif.gz"
                             ),
                         ),
                         name="degibbs_rpe",
                     )
                     rpe_for_preproc = dg_rpe.out
                 else:
-                    rpe_for_preproc = rpe_mif_out
+                    rpe_for_preproc = rpe_after_dn
             else:
-                dwi_for_preproc = dwi_mif.out
-                rpe_for_preproc = rpe_mif_out
+                dwi_for_preproc = dwi_after_dn
+                rpe_for_preproc = rpe_after_dn
 
-            # ── Concatenate AP+PA for rpe_all ─────────────────────────────────
-            if preproc_mode == "rpe_all" and rpe_nii:
-                cat = workflow.add(
-                    concatenate_ap_pa(
-                        ap_mif=dwi_for_preproc,
-                        pa_mif=rpe_for_preproc,
-                        out_mif=str(Path(tmp_dir) / "DWI_AP_PA_concat.mif.gz"),
+            # ── Optional dwifslpreproc ────────────────────────────────────────
+            if do_fslpreproc:
+                # ── Concatenate AP+PA for rpe_all ─────────────────────────────
+                if preproc_mode == "rpe_all" and rpe_nii:
+                    cat = workflow.add(
+                        concatenate_ap_pa(
+                            ap_mif=dwi_for_preproc,
+                            pa_mif=rpe_for_preproc,
+                            out_mif=str(Path(tmp_dir) / "DWI_AP_PA_concat.mif.gz"),
+                        ),
+                        name="concat_ap_pa",
+                    )
+                    dwi_input = cat.out
+                else:
+                    dwi_input = dwi_for_preproc
+
+                # ── se_epi pair (rpe_pair / rpe_split) ────────────────────────
+                se = workflow.add(
+                    build_se_epi(
+                        dwi_mif=dwi_for_preproc,
+                        rpe_nii=rpe_nii or "",
+                        rpe_json=rpe_json,
+                        rpe_bvec=rpe_bvec_lazy,
+                        rpe_bval=rpe_bval_lazy,
+                        fwd_pe_nii=fwd_pe_nii or "",
+                        fwd_pe_json=fwd_pe_json,
+                        fwd_pe_bvec=fwd_bvec_lazy,
+                        fwd_pe_bval=fwd_bval_lazy,
+                        pe_dir=pe_dir,
+                        rpe_dir=rpe_dir,
+                        preproc_mode=preproc_mode,
+                        tmp_dir=tmp_dir,
                     ),
-                    name="concat_ap_pa",
+                    name="se_epi",
                 )
-                dwi_input = cat.out
+                fslpreproc = workflow.add(
+                    run_dwifslpreproc(
+                        dwi_mif=dwi_input,
+                        out_mif=preproc_mif,
+                        pe_dir=pe_dir,
+                        preproc_mode=preproc_mode,
+                        se_epi=se.out,
+                        readout_time=readout_time,
+                        eddy_options=eddy_options,
+                        scratch_dir=str(Path(tmp_dir) / "dwifslpreproc_scratch"),
+                    ),
+                    name="fslpreproc",
+                )
+                preproc_out = fslpreproc.out
             else:
-                dwi_input = dwi_for_preproc
+                preproc_out = dwi_for_preproc
 
-            # ── se_epi pair (rpe_pair / rpe_split) ───────────────────────────
-            se = workflow.add(
-                build_se_epi(
-                    dwi_mif=dwi_for_preproc,
-                    rpe_nii=rpe_nii or "",
-                    rpe_json=rpe_json,
-                    rpe_bvec=rpe_bvec_lazy,
-                    rpe_bval=rpe_bval_lazy,
-                    fwd_pe_nii=fwd_pe_nii or "",
-                    fwd_pe_json=fwd_pe_json,
-                    fwd_pe_bvec=fwd_bvec_lazy,
-                    fwd_pe_bval=fwd_bval_lazy,
-                    pe_dir=pe_dir,
-                    rpe_dir=rpe_dir,
-                    preproc_mode=preproc_mode,
-                    tmp_dir=tmp_dir,
-                ),
-                name="se_epi",
-            )
-
-            # ── dwifslpreproc ─────────────────────────────────────────────────
-            fslpreproc = workflow.add(
-                run_dwifslpreproc(
-                    dwi_mif=dwi_input,
-                    out_mif=preproc_mif,
-                    pe_dir=pe_dir,
-                    preproc_mode=preproc_mode,
-                    se_epi=se.out,
-                    readout_time=readout_time,
-                    eddy_options=eddy_options,
-                    scratch_dir=str(Path(tmp_dir) / "dwifslpreproc_scratch"),
-                ),
-                name="fslpreproc",
-            )
-
-            # ── Mask + DWI bias correction ────────────────────────────────────
-            dwi_mask = workflow.add(
-                run_dwi2mask(
-                    in_mif=fslpreproc.out,
-                    out_mif=str(Path(tmp_dir) / "DWI_preproc_mask.mif.gz"),
-                ),
-                name="dwi_mask",
-            )
-            biascorr = workflow.add(
-                run_dwibiascorrect(
-                    in_mif=fslpreproc.out,
-                    out_mif=biascorr_mif,
-                    mask_mif=dwi_mask.out,
-                    bias_mif=str(Path(tmp_dir) / "DWI_preproc_bias.mif.gz"),
-                ),
-                name="dwi_biascorr",
-            )
-            biascorr_out = biascorr.out
+            # ── Optional bias field correction ────────────────────────────────
+            if do_biascorrect:
+                dwi_mask = workflow.add(
+                    run_dwi2mask(
+                        in_mif=preproc_out,
+                        out_mif=str(Path(tmp_dir) / "DWI_preproc_mask.mif.gz"),
+                    ),
+                    name="dwi_mask",
+                )
+                biascorr = workflow.add(
+                    run_dwibiascorrect(
+                        in_mif=preproc_out,
+                        out_mif=biascorr_mif,
+                        mask_mif=dwi_mask.out,
+                        bias_mif=str(Path(tmp_dir) / "DWI_preproc_bias.mif.gz"),
+                    ),
+                    name="dwi_biascorr",
+                )
+                biascorr_out = biascorr.out
+            else:
+                biascorr_out = preproc_out
 
             # ── T1-to-DWI registration ────────────────────────────────────────
             b0 = workflow.add(
@@ -2306,7 +2363,7 @@ def run_pipeline(cfg: dict):
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"Scans directory:  {scans_dir}")
-    print(f"Denoise/Degibbs:  {cfg.get('denoise_degibbs', False)}")
+    print(f"Processing steps: {', '.join(cfg.get('processing_steps', [])) or '(none)'}")
     print(f"Gradcheck:        {cfg.get('gradcheck', False)}")
     print(f"Keep tmp:         {cfg.get('keep_tmp', False)}")
     print(f"Output:           {Path(output_dir).resolve()}")
@@ -2398,8 +2455,8 @@ def load_config(args) -> dict:
         cfg["scans_dir"] = args.scans_dir
     if args.output_dir:
         cfg["output_dir"] = args.output_dir
-    if args.denoise_degibbs:
-        cfg["denoise_degibbs"] = True
+    if getattr(args, "processing_steps", None):
+        cfg["processing_steps"] = [s.strip() for s in args.processing_steps.split(",") if s.strip()]
     if args.gradcheck:
         cfg["gradcheck"] = True
     if args.nocleanup:
@@ -2420,7 +2477,8 @@ def main():
     parser.add_argument("--config", type=str, help="Path to YAML config file")
     parser.add_argument("--scans-dir", type=str, help="Path to scans directory")
     parser.add_argument("--output-dir", type=str, help="Path to output directory")
-    parser.add_argument("--denoise-degibbs", action="store_true", default=None)
+    parser.add_argument("--processing-steps", type=str, default=None,
+                        help="Comma-separated steps: dwidenoise,mrgibbs,dwifslpreproc")
     parser.add_argument("--gradcheck", action="store_true", default=None)
     parser.add_argument(
         "--nocleanup",
