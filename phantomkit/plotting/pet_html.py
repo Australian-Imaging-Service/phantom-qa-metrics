@@ -129,6 +129,7 @@ def build_pet_html(
     nifti_image: Optional[str] = None,
     vial_niftis: Optional[dict] = None,
     embedded_data: Optional[dict] = None,
+    viewer_cal_max: Optional[float] = None,
 ) -> str:
     """Build a self-contained interactive HTML page for PET vial measurements.
 
@@ -212,6 +213,8 @@ def build_pet_html(
         viewer_html, viewer_js = _niivue_viewer_panel(
             nifti_image,  # type: ignore[arg-type]
             vial_niftis or {},
+            bg_cal_min=0.0,
+            bg_cal_max=viewer_cal_max,
         )
     else:
         viewer_html = viewer_js = ""
@@ -389,12 +392,15 @@ def plot_pet_vials(
     )
     mean_arr = mean_df.iloc[:, 1:].to_numpy()[:, 0]
 
+    max_arr = _sheet("max")
+    cal_max = float(max_arr.max()) if max_arr is not None and max_arr.size else None
+
     html = build_pet_html(
         vials=vials,
         mean_values=mean_arr,
         std_values=_sheet("std"),
         median_values=_sheet("median"),
-        max_values=_sheet("max"),
+        max_values=max_arr,
         count_values=_sheet("count"),
         p25_values=_sheet("p25"),
         p75_values=_sheet("p75"),
@@ -411,6 +417,7 @@ def plot_pet_vials(
             "phantom": phantom,
             "vials": vials,
         },
+        viewer_cal_max=cal_max,
     )
 
     output_path = Path(output).with_suffix(".html")
