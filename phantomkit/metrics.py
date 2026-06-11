@@ -14,7 +14,7 @@ from fileformats.generic import File
 from fileformats.medimage import NiftiGz
 from pydra.compose import python, workflow
 from pydra.tasks.ants.v2.resampling.apply_transforms import ApplyTransforms
-from pydra.tasks.mrtrix3.v3_1 import MrConvert, MrGrid, MrInfo, MrStats
+from pydra.tasks.mrtrix3.v3_0 import MrConvert, MrGrid, MrInfo, MrStats
 
 from phantomkit.registration import ParseMrStatsStdout
 

@@ -195,10 +195,10 @@ def _build_command(slug: str, single_cls, batch_cls) -> click.Command:
     click_params += [
         click.Option(
             ["--worker"],
-            type=click.Choice(["cf", "serial"]),
+            type=click.Choice(["cf", "debug"]),
             default="cf",
             show_default=True,
-            help="Pydra worker type.",
+            help="Pydra worker type. 'cf' = concurrent futures (default). 'debug' = single-threaded with full tracebacks.",
         ),
         click.Option(
             ["--pattern"],
@@ -410,10 +410,10 @@ def view_mri(nifti_image: str, vials_dir: str | None, title: str, port: int) -> 
 )
 @click.option(
     "--worker",
-    type=click.Choice(["cf", "serial"]),
+    type=click.Choice(["cf", "debug"]),
     default="cf",
     show_default=True,
-    help="Pydra worker type for workflow submission.",
+    help="Pydra worker type. 'cf' = concurrent futures (default). 'debug' = single-threaded with full tracebacks.",
 )
 @click.option(
     "--dry-run",

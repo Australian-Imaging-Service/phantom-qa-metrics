@@ -11,7 +11,7 @@ from pathlib import Path
 from fileformats.generic import File
 from fileformats.medimage import NiftiGz
 from pydra.compose import python, shell, workflow
-from pydra.tasks.mrtrix3.v3_1 import MrGrid, MrMath
+from pydra.tasks.mrtrix3.v3_0 import MrGrid, MrMath
 
 logger = logging.getLogger(__name__)
 

@@ -24,7 +24,7 @@ from fileformats.vendor.mrtrix3.medimage import (
     ImageFormat as MifImage,
 )
 from pydra.compose import python, workflow
-from pydra.tasks.mrtrix3.v3_1 import (
+from pydra.tasks.mrtrix3.v3_0 import (
     DwiBiascorrect_Ants as DwiBiascorrectAnts,
     DwiDenoise,
     DwiExtract,

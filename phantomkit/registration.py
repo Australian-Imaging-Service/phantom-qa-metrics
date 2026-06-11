@@ -10,7 +10,7 @@ from pathlib import Path
 from fileformats.generic import File
 from fileformats.medimage import NiftiGz
 from pydra.compose import python, shell, workflow
-from pydra.tasks.mrtrix3.v3_1 import MrConvert
+from pydra.tasks.mrtrix3.v3_0 import MrConvert
 
 logger = logging.getLogger(__name__)
 

@@ -1721,7 +1721,7 @@ def DWISeriesWorkflow(
     do_degibbs = "mrgibbs" in _steps
     do_fslpreproc = "dwifslpreproc" in _steps
     do_biascorrect = "dwibiascorrect" in _steps
-    from pydra.tasks.mrtrix3.v3_1 import (
+    from pydra.tasks.mrtrix3.v3_0 import (
         DwiDenoise,
         DwiBiascorrect_Ants,
         DwiExtract,
