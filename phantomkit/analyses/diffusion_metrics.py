@@ -1657,6 +1657,7 @@ def CumulativeDwiPipeline(
             nocleanup=False,
             force=True,
             quiet=True,
+            config=[],
         ),
         name="step06_biascorr",
     )
@@ -2011,6 +2012,7 @@ def IsolatedDwiPipeline(
             nocleanup=False,
             force=True,
             quiet=True,
+            config=[],
         ),
         name="iso_biascorr",
     )

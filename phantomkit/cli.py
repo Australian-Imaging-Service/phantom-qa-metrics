@@ -446,7 +446,7 @@ def run_pipeline(
     import threading
 
     from fileformats.medimage import NiftiGz
-    from fileformats.medimage_mrtrix3 import ImageFormatGz
+    from fileformats.vendor.mrtrix3.medimage import ImageFormatGz
     from pydra.engine import Submitter
 
     from phantomkit.pipeline import (
@@ -607,7 +607,7 @@ def run_pipeline(
                 )
                 cache_dir = str(series_out / ".pydra_cache")
                 with Submitter(worker=worker, cache_root=cache_dir) as sub:
-                    sub(wf, rerun=True)
+                    sub(wf)
 
                 dwi_output_dirs.append(series_out)
 

@@ -24,7 +24,7 @@ from pathlib import Path
 
 from pydra.compose import python, workflow
 from fileformats.medimage import NiftiGz, Bvec, Bval
-from fileformats.medimage_mrtrix3 import ImageIn, ImageOut
+from fileformats.vendor.mrtrix3.medimage import ImageIn, ImageOut
 from fileformats.generic import File
 
 

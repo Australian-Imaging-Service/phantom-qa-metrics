@@ -32,7 +32,7 @@ from pydra.compose import python, workflow
 from pydra.engine import Submitter
 import yaml
 from fileformats.medimage import NiftiGz
-from fileformats.medimage_mrtrix3 import ImageIn, ImageOut
+from fileformats.vendor.mrtrix3.medimage import ImageIn, ImageOut, ImageFormatGz
 
 
 # =============================================================================
@@ -1556,6 +1556,108 @@ def cleanup_tmp(sentinel: str, tmp_dir: str, keep_tmp: bool) -> str:
 
 
 # =============================================================================
+# FSL subprocess wrappers — bypass pydra-tasks-fsl 0.3.1 incompatibilities
+# with pydra 1.0a9 (mandatory-field rules, xor semantics, eddy_options quoting)
+# =============================================================================
+
+
+@python.define(outputs=["out"])
+def RunDwifslpreproc(
+    in_file: object,
+    pe_dir: str,
+    preproc_mode: str,
+    eddy_options: str | None = None,
+    readout_time: float | None = None,
+    se_epi: object = None,
+) -> ImageFormatGz:
+    """Run dwifslpreproc via subprocess with correct eddy_options quoting.
+
+    pydra-tasks-fsl formats the command as a string then splits on whitespace,
+    stripping any leading space from eddy_options values.  Without the leading
+    space, MRtrix3's argparse mistakes '--slm=linear' for a new option flag and
+    raises 'expected one argument'.  Running via subprocess list preserves the
+    leading space and avoids the xor/mandatory-field rule breakage in
+    pydra-tasks-fsl 0.3.1 under pydra 1.0a9.
+    """
+    import subprocess
+    from pathlib import Path as _Path
+    from fileformats.vendor.mrtrix3.medimage import ImageFormatGz as _MifGz
+
+    out_file = str(_Path.cwd() / "dwi_preproc.mif")
+    cmd = ["dwifslpreproc", str(in_file), out_file, "-pe_dir", pe_dir]
+
+    if preproc_mode == "rpe_all":
+        cmd.append("-rpe_all")
+    elif preproc_mode in ("rpe_pair", "rpe_split") and se_epi is not None:
+        cmd += ["-rpe_pair", "-se_epi", str(se_epi)]
+    else:
+        cmd.append("-rpe_none")
+
+    if readout_time is not None:
+        cmd += ["-readout_time", str(readout_time)]
+
+    if eddy_options:
+        # Prepend a space so MRtrix3's argparse treats the value as a positional
+        # string and not an option flag (values starting with '--' are misread).
+        cmd += ["-eddy_options", f" {eddy_options.strip()}"]
+
+    subprocess.run(cmd, check=True)
+    return _MifGz(out_file)
+
+
+@python.define(outputs=["out"])
+def FlirtCoregister(b0: object, t1: object) -> NiftiGz:
+    """Register b0 to T1 (6 DOF), invert transform, warp T1 into DWI space.
+
+    Runs flirt and convert_xfm via subprocess, avoiding pydra-tasks-fsl
+    compatibility breakage with pydra 1.0a9 (xor-group mandatory-field rules).
+    Returns T1_in_DWI_space.nii.gz as a NiftiGz.
+    """
+    import subprocess
+    from pathlib import Path as _Path
+    from fileformats.medimage import NiftiGz as _NiftiGz
+
+    cwd = _Path.cwd()
+    b0_str = str(b0)
+    t1_str = str(t1)
+    mat_fwd = str(cwd / "b0_to_t1.mat")
+    mat_inv = str(cwd / "t1_to_b0.mat")
+    out_path = str(cwd / "T1_in_DWI_space.nii.gz")
+
+    subprocess.run(
+        ["flirt", "-in", b0_str, "-ref", t1_str, "-dof", "6", "-omat", mat_fwd],
+        check=True,
+    )
+    subprocess.run(
+        ["convert_xfm", "-omat", mat_inv, "-inverse", mat_fwd],
+        check=True,
+    )
+    subprocess.run(
+        ["flirt", "-in", t1_str, "-ref", b0_str, "-applyxfm", "-init", mat_inv, "-out", out_path],
+        check=True,
+    )
+    return _NiftiGz(out_path)
+
+
+# =============================================================================
+# Type-narrowing adapter for Tensor2Metric dual-use outputs
+# =============================================================================
+
+
+@python.define(outputs=["out"])
+def CastToMif(path: object) -> ImageFormatGz:
+    """Coerce a Tensor2Metric dual-use output (Union[image, bool, None]) to ImageFormatGz.
+
+    Tensor2Metric's adc/fa outputs are declared as Union[image_types, bool, NoneType]
+    because the same field doubles as the boolean enable-flag input.  Passing the lazy
+    field directly to MrConvert.in_file fails pydra's static type check.  This adapter
+    accepts `object` (compatible with any upstream type) and re-wraps the resolved path
+    as an explicit ImageFormatGz so downstream tasks see a clean image type.
+    """
+    return ImageFormatGz(str(path))
+
+
+# =============================================================================
 # DWISeriesWorkflow — canonical @workflow.define for a single DWI series
 # =============================================================================
 
@@ -1582,7 +1684,6 @@ def DWISeriesWorkflow(
     """
     from pydra.tasks.mrtrix3.v3_1 import (
         DwiDenoise,
-        DwiFslpreproc,
         DwiBiascorrect_Ants,
         Dwi2Mask_Fslbet,
         DwiExtract,
@@ -1593,13 +1694,12 @@ def DWISeriesWorkflow(
         DwiGradcheck,
         MrDegibbs,
     )
-    from pydra.tasks.fsl.v6 import FLIRT, ConvertXFM
     from phantomkit.tasks.ants import DwiCatMulti
 
     # ── Optional gradient-table correction ───────────────────────────────────
     if gradcheck:
         gc = workflow.add(
-            DwiGradcheck(in_file=dwi, export_grad_mrtrix=True),
+            DwiGradcheck(in_file=dwi, export_grad_mrtrix=True, config=[]),
             name="gradcheck",
         )
         # Re-embed corrected gradient orientations into a new MIF
@@ -1632,10 +1732,10 @@ def DWISeriesWorkflow(
             name="concat_ap_pa",
         )
         preproc = workflow.add(
-            DwiFslpreproc(
+            RunDwifslpreproc(
                 in_file=cat.out_file,
                 pe_dir=dwi_pe_dir,
-                rpe_all=True,
+                preproc_mode="rpe_all",
                 readout_time=readout_time,
                 eddy_options=eddy_options,
             ),
@@ -1657,10 +1757,10 @@ def DWISeriesWorkflow(
         else:
             se_epi = rpe_b0.out_file
         preproc = workflow.add(
-            DwiFslpreproc(
+            RunDwifslpreproc(
                 in_file=dwi_for_preproc,
                 pe_dir=dwi_pe_dir,
-                rpe_pair=True,
+                preproc_mode=preproc_mode,
                 se_epi=se_epi,
                 readout_time=readout_time,
                 eddy_options=eddy_options,
@@ -1669,10 +1769,10 @@ def DWISeriesWorkflow(
         )
     else:  # rpe_none
         preproc = workflow.add(
-            DwiFslpreproc(
+            RunDwifslpreproc(
                 in_file=dwi_for_preproc,
                 pe_dir=dwi_pe_dir,
-                rpe_none=True,
+                preproc_mode="rpe_none",
                 eddy_options=eddy_options,
             ),
             name="preproc",
@@ -1680,10 +1780,10 @@ def DWISeriesWorkflow(
 
     # ── Brain mask + bias field correction ───────────────────────────────────
     mask = workflow.add(
-        Dwi2Mask_Fslbet(in_file=preproc.out_file), name="mask"
+        Dwi2Mask_Fslbet(in_file=preproc.out, config=[]), name="mask"
     )
     biascorr = workflow.add(
-        DwiBiascorrect_Ants(in_file=preproc.out_file, mask=mask.out_file),
+        DwiBiascorrect_Ants(in_file=preproc.out, mask=mask.out_file, config=[]),
         name="biascorr",
     )
 
@@ -1700,37 +1800,27 @@ def DWISeriesWorkflow(
     )
 
     # ── T1 → DWI space coregistration (FLIRT rigid, 6 DOF) ───────────────────
-    b0_to_t1 = workflow.add(
-        FLIRT(in_file=b0_nii.out_file, reference=t1w, dof=6), name="b0_to_t1"
-    )
-    inv_xfm = workflow.add(
-        ConvertXFM(in_file=b0_to_t1.out_matrix_file, invert_xfm=True),
-        name="invert_xfm",
-    )
     t1_in_dwi = workflow.add(
-        FLIRT(
-            in_file=t1w,
-            reference=b0_nii.out_file,
-            apply_xfm=True,
-            in_matrix_file=inv_xfm.out_file,
-        ),
-        name="t1_to_dwi",
+        FlirtCoregister(b0=b0_nii.out_file, t1=t1w),
+        name="coreg",
     )
 
     # ── Diffusion tensor + metrics ────────────────────────────────────────────
     tensor = workflow.add(Dwi2Tensor(dwi=biascorr.out_file), name="tensor")
     metrics = workflow.add(
-        Tensor2Metric(tensor=tensor.dt, adc=True, fa=True), name="metrics"
+        Tensor2Metric(tensor=tensor.dt, adc="ADC.mif", fa="FA.mif"), name="metrics"
     )
+    adc_cast = workflow.add(CastToMif(path=metrics.adc), name="adc_cast")
+    fa_cast = workflow.add(CastToMif(path=metrics.fa), name="fa_cast")
     adc_nii = workflow.add(
-        MrConvert(in_file=metrics.adc, out_file="ADC.nii.gz"), name="adc_to_nii"
+        MrConvert(in_file=adc_cast.out, out_file="ADC.nii.gz"), name="adc_to_nii"
     )
     fa_nii = workflow.add(
-        MrConvert(in_file=metrics.fa, out_file="FA.nii.gz"), name="fa_to_nii"
+        MrConvert(in_file=fa_cast.out, out_file="FA.nii.gz"), name="fa_to_nii"
     )
 
     return (
-        t1_in_dwi.out_file,
+        t1_in_dwi.out,
         adc_nii.out_file,
         fa_nii.out_file,
         biascorr.out_file,

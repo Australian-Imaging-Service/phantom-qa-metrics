@@ -2,7 +2,7 @@
 from pydra.compose import shell
 from pydra.utils.typing import MultiInputObj
 from fileformats.medimage import NiftiGz
-from fileformats.medimage_mrtrix3 import ImageIn, ImageOut
+from fileformats.vendor.mrtrix3.medimage import ImageIn, ImageOut
 from fileformats.generic import File
 
 
