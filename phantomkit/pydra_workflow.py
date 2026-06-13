@@ -139,7 +139,7 @@ def RunPhantomSession(
 # ---------------------------------------------------------------------------
 
 
-@workflow.define(outputs=["adc", "fa", "t1_in_dwi", "dwi_preproc"])
+@workflow.define(outputs=["t1_in_dwi", "adc", "fa", "dwi_preproc"])
 def PhantomKitWorkflow(
     # ── Core anatomical & phantom identity ───────────────────────────────────
     t1w: NiftiGz,

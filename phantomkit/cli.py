@@ -476,6 +476,10 @@ def run_pipeline(
     validate_inputs(input_path, phantom)
     output_path.mkdir(parents=True, exist_ok=True)
 
+    import os as _os
+    n_threads = _os.cpu_count() or 1
+    _os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", str(n_threads))
+
     cfg = {
         "scans_dir": str(input_path),
         "output_dir": str(output_path),
@@ -564,26 +568,28 @@ def run_pipeline(
 
                 # ── Convert DWI NIfTI + grad files to MIF ────────────────────
                 dwi_mif_path = str(series_tmp / f"DWI_raw_{plan['pe_dir']}.mif.gz")
-                _mif_cmd = [
-                    "mrconvert", plan["dwi_nii"], dwi_mif_path,
-                    "-fslgrad", plan["dwi_bvec"], plan["dwi_bval"],
-                ]
-                if plan.get("dwi_json"):
-                    _mif_cmd += ["-json_import", plan["dwi_json"]]
-                subprocess.run(_mif_cmd, check=True)
+                if not Path(dwi_mif_path).exists():
+                    _mif_cmd = [
+                        "mrconvert", plan["dwi_nii"], dwi_mif_path,
+                        "-fslgrad", plan["dwi_bvec"], plan["dwi_bval"],
+                    ]
+                    if plan.get("dwi_json"):
+                        _mif_cmd += ["-json_import", plan["dwi_json"]]
+                    subprocess.run(_mif_cmd, check=True)
                 dwi = ImageFormatGz(dwi_mif_path)
 
                 # ── Convert RPE NIfTI to MIF (if applicable) ─────────────────
                 rpe_img = None
                 if plan.get("rpe_nii"):
                     rpe_mif_path = str(series_tmp / f"RPE_{plan['rpe_dir']}.mif.gz")
-                    _rpe_cmd = [
-                        "mrconvert", plan["rpe_nii"], rpe_mif_path,
-                        "-fslgrad", plan["rpe_bvec"], plan["rpe_bval"],
-                    ]
-                    if plan.get("rpe_json"):
-                        _rpe_cmd += ["-json_import", plan["rpe_json"]]
-                    subprocess.run(_rpe_cmd, check=True)
+                    if not Path(rpe_mif_path).exists():
+                        _rpe_cmd = [
+                            "mrconvert", plan["rpe_nii"], rpe_mif_path,
+                            "-fslgrad", plan["rpe_bvec"], plan["rpe_bval"],
+                        ]
+                        if plan.get("rpe_json"):
+                            _rpe_cmd += ["-json_import", plan["rpe_json"]]
+                        subprocess.run(_rpe_cmd, check=True)
                     rpe_img = ImageFormatGz(rpe_mif_path)
 
                 # ── Forward b0 (rpe_pair only) ────────────────────────────────
@@ -607,7 +613,20 @@ def run_pipeline(
                 )
                 cache_dir = str(series_out / ".pydra_cache")
                 with Submitter(worker=worker, cache_root=cache_dir) as sub:
-                    sub(wf)
+                    result = sub(wf)
+
+                # Copy workflow outputs from pydra cache to series_out so that
+                # Stage 2 (PhantomProcessor) can find them by conventional names.
+                out = result.outputs
+                _copy_map = [
+                    (out.t1_in_dwi,    "T1_in_DWI_space.nii.gz"),
+                    (out.adc,          "ADC.nii.gz"),
+                    (out.fa,           "FA.nii.gz"),
+                    (out.dwi_preproc,  "DWI_preproc_biascorr.mif.gz"),
+                ]
+                for src, dst_name in _copy_map:
+                    if src is not None:
+                        shutil.copy2(str(src), str(series_out / dst_name))
 
                 dwi_output_dirs.append(series_out)
 
@@ -618,7 +637,7 @@ def run_pipeline(
         nonlocal stage3_error
         try:
             if has_native:
-                run_stage3(input_path, output_path, template_dir, scan_info, dry_run)
+                run_stage3(input_path, output_path, template_dir, scan_info, dry_run, n_threads=n_threads)
             else:
                 with _print_lock:
                     print_header("STAGE 3 — Phantom QC on Native Contrasts")
@@ -639,7 +658,7 @@ def run_pipeline(
 
     # Stage 2: phantom QC in DWI space (sequential — needs Stage 1 outputs)
     if dwi_output_dirs:
-        run_stage2(dwi_output_dirs, output_path, template_dir, dry_run)
+        run_stage2(dwi_output_dirs, output_path, template_dir, dry_run, n_threads=n_threads)
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")

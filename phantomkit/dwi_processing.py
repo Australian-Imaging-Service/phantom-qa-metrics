@@ -1583,7 +1583,7 @@ def RunDwifslpreproc(
     from pathlib import Path as _Path
     from fileformats.vendor.mrtrix3.medimage import ImageFormatGz as _MifGz
 
-    out_file = str(_Path.cwd() / "dwi_preproc.mif")
+    out_file = str(_Path.cwd() / "dwi_preproc.mif.gz")
     cmd = ["dwifslpreproc", str(in_file), out_file, "-pe_dir", pe_dir]
 
     if preproc_mode == "rpe_all":
@@ -1602,6 +1602,23 @@ def RunDwifslpreproc(
         cmd += ["-eddy_options", f" {eddy_options.strip()}"]
 
     subprocess.run(cmd, check=True)
+    return _MifGz(out_file)
+
+
+@python.define(outputs=["out"])
+def MrThresholdMask(b0: object) -> ImageFormatGz:
+    """Create a binary phantom mask from mean b0 using mrthreshold (Otsu).
+
+    dwi2mask fslbet uses FSL BET which requires brain-like morphology and
+    fails on phantom data.  mrthreshold with Otsu reliably separates the
+    phantom object (high signal) from background regardless of shape.
+    """
+    import subprocess
+    from pathlib import Path as _Path
+    from fileformats.vendor.mrtrix3.medimage import ImageFormatGz as _MifGz
+
+    out_file = str(_Path.cwd() / "phantom_mask.mif.gz")
+    subprocess.run(["mrthreshold", str(b0), out_file], check=True)
     return _MifGz(out_file)
 
 
@@ -1685,7 +1702,6 @@ def DWISeriesWorkflow(
     from pydra.tasks.mrtrix3.v3_1 import (
         DwiDenoise,
         DwiBiascorrect_Ants,
-        Dwi2Mask_Fslbet,
         DwiExtract,
         MrMath,
         MrConvert,
@@ -1778,25 +1794,25 @@ def DWISeriesWorkflow(
             name="preproc",
         )
 
-    # ── Brain mask + bias field correction ───────────────────────────────────
-    mask = workflow.add(
-        Dwi2Mask_Fslbet(in_file=preproc.out, config=[]), name="mask"
-    )
-    biascorr = workflow.add(
-        DwiBiascorrect_Ants(in_file=preproc.out, mask=mask.out_file, config=[]),
-        name="biascorr",
-    )
-
-    # ── Extract mean b0 → NIfTI for FLIRT ────────────────────────────────────
+    # ── Mean b0 → phantom mask + FLIRT reference ─────────────────────────────
     b0_vols = workflow.add(
-        DwiExtract(in_file=biascorr.out_file, bzero=True), name="b0_extract"
+        DwiExtract(in_file=preproc.out, bzero=True), name="b0_extract"
     )
     b0_mean = workflow.add(
         MrMath(in_file=b0_vols.out_file, operation="mean", axis=3), name="b0_mean"
     )
+    mask = workflow.add(
+        MrThresholdMask(b0=b0_mean.out_file), name="mask"
+    )
     b0_nii = workflow.add(
         MrConvert(in_file=b0_mean.out_file, out_file="b0_mean.nii.gz"),
         name="b0_to_nii",
+    )
+
+    # ── Bias field correction ─────────────────────────────────────────────────
+    biascorr = workflow.add(
+        DwiBiascorrect_Ants(in_file=preproc.out, mask=mask.out, config=[]),
+        name="biascorr",
     )
 
     # ── T1 → DWI space coregistration (FLIRT rigid, 6 DOF) ───────────────────
@@ -1808,7 +1824,7 @@ def DWISeriesWorkflow(
     # ── Diffusion tensor + metrics ────────────────────────────────────────────
     tensor = workflow.add(Dwi2Tensor(dwi=biascorr.out_file), name="tensor")
     metrics = workflow.add(
-        Tensor2Metric(tensor=tensor.dt, adc="ADC.mif", fa="FA.mif"), name="metrics"
+        Tensor2Metric(tensor=tensor.dt, adc="ADC.mif.gz", fa="FA.mif.gz"), name="metrics"
     )
     adc_cast = workflow.add(CastToMif(path=metrics.adc), name="adc_cast")
     fa_cast = workflow.add(CastToMif(path=metrics.fa), name="fa_cast")
