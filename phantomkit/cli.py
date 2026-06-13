@@ -628,6 +628,12 @@ def run_pipeline(
                     if src is not None:
                         shutil.copy2(str(src), str(series_out / dst_name))
 
+                # Expose the raw DWI MIF as DWI_raw.mif.gz so _process_dwi_html
+                # can show the raw vs preprocessed dual-viewer panel in DWI.html.
+                raw_mif_src = series_tmp / f"DWI_raw_{plan['pe_dir']}.mif.gz"
+                if raw_mif_src.exists():
+                    shutil.copy2(str(raw_mif_src), str(series_out / "DWI_raw.mif.gz"))
+
                 dwi_output_dirs.append(series_out)
 
         except Exception as exc:
