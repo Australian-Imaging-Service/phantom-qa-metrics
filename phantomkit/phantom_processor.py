@@ -951,6 +951,12 @@ def _process_dwi_html(
     def _snr_matrix(snr_dict):
         return [[snr_dict[vn][k] for vn in vial_names] for k in range(n_vols)]
 
+    # Derive a human-readable viewer label from the MIF filename,
+    # e.g. "DWI_denoise_preproc_biascorr.mif.gz" → "DWI (denoise → preproc → biascorr)"
+    _stem = dwi_mif.name.replace(".mif.gz", "").replace(".mif", "")
+    _parts = _stem[len("DWI_"):].split("_") if _stem.startswith("DWI_") else []
+    _proc_label = f"DWI ({' → '.join(_parts)})" if _parts else "DWI (processed)"
+
     _dwi_name = f"{filename_prefix}_DWI" if filename_prefix else "DWI"
     output_html = str(plots_dir / f"{_dwi_name}.html")
 
@@ -961,6 +967,7 @@ def _process_dwi_html(
         cnr_data={"vials": vial_names, "n_vols": n_vols, "cnr": cnr_p},
         session_name=session_name,
         output_file=output_html,
+        proc_label=_proc_label,
         raw_meanb0_nii=meanb0_raw,
         raw_snr_data={"vials": vial_names, "n_vols": n_vols, "snr": _snr_matrix(snr_r)} if has_raw else None,
         raw_cnr_data={"vials": vial_names, "n_vols": n_vols, "cnr": cnr_r} if has_raw else None,
@@ -1196,8 +1203,12 @@ def _task_generate_plots(
                 print(f"    ✗ {contrast_type_key.upper()} PNG map plot failed: {e}")
 
     # ── DWI-specific: SNR/CNR xlsx + DWI.html ────────────────────────────────
-    _dwi_mif = metrics_path.parent / "DWI_preproc_biascorr.mif.gz"
-    if _dwi_mif.exists() and output_format == "html":
+    _dwi_candidates = [
+        p for p in metrics_path.parent.glob("DWI_*.mif.gz")
+        if p.name != "DWI_raw.mif.gz"
+    ]
+    _dwi_mif = _dwi_candidates[0] if _dwi_candidates else None
+    if _dwi_mif and _dwi_mif.exists() and output_format == "html":
         try:
             _process_dwi_html(
                 dwi_mif=_dwi_mif,

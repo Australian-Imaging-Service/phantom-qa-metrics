@@ -636,6 +636,11 @@ def run_pipeline(
                 with Submitter(worker=worker, cache_root=cache_dir) as sub:
                     result = sub(wf)
 
+                if result is None or result.errored:
+                    raise RuntimeError(
+                        f"PhantomKitWorkflow failed — see crash report in {cache_dir}"
+                    )
+
                 # Copy workflow outputs from pydra cache to series_out so that
                 # Stage 2 (PhantomProcessor) can find them by conventional names.
                 out = result.outputs
@@ -643,7 +648,7 @@ def run_pipeline(
                     (out.t1_in_dwi,    "T1_in_DWI_space.nii.gz"),
                     (out.adc,          "ADC.nii.gz"),
                     (out.fa,           "FA.nii.gz"),
-                    (out.dwi_preproc,  "DWI_preproc_biascorr.mif.gz"),
+                    (out.dwi_preproc,  plan["dwi_preproc_name"]),
                 ]
                 for src, dst_name in _copy_map:
                     if src is not None:

@@ -384,6 +384,7 @@ def build_dwi_html(
     cnr_data: dict,
     session_name: str,
     output_file: str,
+    proc_label: str = "DWI (processed)",
     raw_meanb0_nii: str | None = None,
     raw_snr_data: dict | None = None,
     raw_cnr_data: dict | None = None,
@@ -435,6 +436,7 @@ def build_dwi_html(
         bg_raw_b64  = nifti_to_base64(raw_meanb0_nii)
         viewer_html, viewer_js = _dual_viewer_panels(
             bg_raw_b64, bg_proc_b64, vials_data,
+            label_right=proc_label,
         )
     elif _has_proc_bg:
         # Single-column: reuse the common viewer panel
