@@ -1,6 +1,6 @@
 ```mermaid
 flowchart TD
-    INPUT[/"--input-dir  --phantom  --output-dir<br/>Sub-directories may contain DICOM · NIfTI (.nii/.nii.gz) · MIF (.mif/.mif.gz)"/]
+    INPUT[/"--input-dir  --phantom  --output-dir<br/>--processing-steps dwidenoise,mrgibbs,dwifslpreproc,dwibiascorrect  (any subset; default: none)<br/>--gradcheck  --nocleanup  --readout-time  --eddy-options  --dry-run  --worker cf|debug<br/>Sub-directories may contain DICOM · NIfTI (.nii/.nii.gz) · MIF (.mif/.mif.gz)"/]
 
     INPUT --> VALIDATE["validate_inputs()<br/>check template_data/{phantom}/ exists"]
     VALIDATE --> PET_FORK{phantom == PET?}
@@ -24,13 +24,15 @@ flowchart TD
         CLASSIFY --> TYPED["Wrap inputs as typed fileformats objects<br/>T1 → NiftiGz  ·  DWI → ImageFormatGz (mrconvert + bvec/bval/JSON)<br/>RPE → ImageFormatGz  (optional)<br/>fwd-b0 → NiftiGz  (optional)"]
         TYPED --> SUBMIT["PhantomKitWorkflow  (pydra_workflow.py)<br/>↳ DWISeriesWorkflow  (dwi_processing.py)<br/>submitted via pydra Submitter"]
 
-        SUBMIT --> GRADCHECK["Optional: DwiGradcheck<br/>→ embed corrected gradients  (MrConvert)"]
-        GRADCHECK --> DENOISE["Optional: DwiDenoise + MrDegibbs"]
-        DENOISE --> PREPROC["RunDwifslpreproc<br/>rpe_none  — no distortion correction<br/>rpe_pair  — spin-echo EPI pair  (RPE b0 + optional fwd-b0)<br/>rpe_split — SE pair from split series<br/>rpe_all   — full concatenated AP+PA  (DwiCatMulti first)"]
-        PREPROC --> BIASCORR["Dwi2Mask_Fslbet → DwiBiascorrect_Ants"]
+        SUBMIT --> GRADCHECK["Optional  (--gradcheck)<br/>DwiGradcheck → embed corrected gradients  (MrConvert)"]
+        GRADCHECK --> DENOISE["Optional  (--processing-steps dwidenoise)<br/>DwiDenoise"]
+        DENOISE --> DEGIBBS["Optional  (--processing-steps mrgibbs)<br/>MrDegibbs"]
+        DEGIBBS --> PREPROC["Optional  (--processing-steps dwifslpreproc)<br/>RunDwifslpreproc<br/>rpe_none  — no distortion correction<br/>rpe_pair  — spin-echo EPI pair  (RPE b0 + optional fwd-b0)<br/>rpe_split — SE pair from split series<br/>rpe_all   — full concatenated AP+PA  (DwiCatMulti first)"]
+        PREPROC --> BIASCORR["Optional  (--processing-steps dwibiascorrect)<br/>run_dwi2mask → run_dwibiascorrect"]
         BIASCORR --> B0NII["DwiExtract → MrMath (mean, axis 3) → MrConvert<br/>→ b0_mean.nii.gz"]
         B0NII --> FLIRT["FlirtCoregister<br/>b0→T1 (6 DOF, flirt)<br/>invert xfm → T1→DWI space (flirt -applyxfm)<br/>→ T1_in_DWI_space.nii.gz"]
         B0NII --> TENSOR["Dwi2Tensor → Tensor2Metric → CastToMif → MrConvert<br/>→ ADC.nii.gz  FA.nii.gz"]
+        FLIRT --> COPY["Copy outputs from pydra cache → series_out/<br/>T1_in_DWI_space.nii.gz · ADC.nii.gz · FA.nii.gz<br/>DWI_{steps}.mif.gz  (name reflects steps applied)"]
     end
 
     subgraph S3["Stage 3 — Native Contrast QC  (pipeline.py)"]
@@ -39,7 +41,7 @@ flowchart TD
         STAGE3 --> WF3["PhantomProcessor.process_session(T1.nii.gz)<br/>— see PhantomSessionWf detail —"]
     end
 
-    FLIRT --> S2
+    COPY --> S2
 
     subgraph S2["Stage 2 — DWI-space Phantom QC  (pipeline.py)"]
         direction TB

@@ -188,6 +188,7 @@ def VialSignalAnalysis(
     template_dir: Directory,
     output_base_dir: Path | None = None,
     num_threads: int = 1,
+    nocleanup: bool = False,
 ) -> tuple[Directory, Directory, Directory, NiftiGz]:
     """
     Pydra workflow for processing a single phantom MRI session.
@@ -315,10 +316,11 @@ def VialSignalAnalysis(
         name="generate_plots",
     )
 
-    workflow.add(
-        Cleanup(dirs=[paths.tmp_dir]),
-        name="cleanup",
-    )
+    if not nocleanup:
+        workflow.add(
+            Cleanup(dirs=[paths.tmp_dir]),
+            name="cleanup",
+        )
 
     return (
         extract_metrics.out,
@@ -334,6 +336,7 @@ def VialSignalAnalysisBatch(
     template_dir: Directory,
     output_base_dir: Path,
     num_threads: int = 1,
+    nocleanup: bool = False,
 ) -> list:
     """
     Pydra workflow for batch-processing multiple phantom sessions in parallel.
@@ -373,6 +376,7 @@ def VialSignalAnalysisBatch(
             template_dir=template_dir,
             output_base_dir=output_base_dir,
             num_threads=num_threads,
+            nocleanup=nocleanup,
         )
         .split("input_image")
         .combine("input_image"),

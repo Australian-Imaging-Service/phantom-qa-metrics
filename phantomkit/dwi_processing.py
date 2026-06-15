@@ -1080,7 +1080,7 @@ def plan_workflow(
         readout_time_source = "fallback (no JSON found)"
 
     processing_steps = cfg.get("processing_steps", [])
-    do_gradcheck = cfg.get("gradcheck", False)
+    do_gradcheck = cfg.get("gradcheck", False) or "gradcheck" in processing_steps
     eddy_options = cfg.get("eddy_options", " --slm=linear")
     keep_tmp = cfg.get("keep_tmp", False)
 
@@ -1180,6 +1180,8 @@ def print_plan(plans: list, skipped: list):
         print(f"  Readout time:   {p['readout_time']} ({p['readout_time_src']})")
         _steps = p.get("processing_steps") or []
         _pipeline = ["raw DWI"]
+        if p["do_gradcheck"]:
+            _pipeline.append("gradcheck")
         if "dwidenoise" in _steps:
             _pipeline.append("dwidenoise")
         if "mrgibbs" in _steps:
@@ -1191,7 +1193,6 @@ def print_plan(plans: list, skipped: list):
         _pipeline.append("tensor")
         print(f"  Pipeline:       {' → '.join(_pipeline)}")
         print(f"  Output MIF:     {p['dwi_preproc_name']}")
-        print(f"  Gradcheck:      {p['do_gradcheck']}")
 
         if p["do_gradcheck"]:
             targets = [f"DWI ({p['pe_dir']})"]
@@ -1573,9 +1574,26 @@ def cleanup_tmp(sentinel: str, tmp_dir: str, keep_tmp: bool) -> str:
 
 
 # =============================================================================
-# FSL subprocess wrappers — bypass pydra-tasks-fsl 0.3.1 incompatibilities
-# with pydra 1.0a9 (mandatory-field rules, xor semantics, eddy_options quoting)
+# FSL / MRtrix3 subprocess wrappers — bypass pydra 1.0a9 type-checking issues
+# (mandatory-field rules, xor semantics, eddy_options quoting, MultiInputObj)
 # =============================================================================
+
+
+@python.define(outputs=["out"])
+def RunDwicat(input1: object, input2: object) -> ImageFormatGz:
+    """Concatenate two DWI series using dwicat via subprocess.
+
+    DwiCatMulti passes inputs as a Python list to MultiInputObj, which pydra
+    1.0a9 cannot coerce when the elements are lazy fields.  Running via
+    subprocess avoids the type-checking issue entirely.
+    """
+    import subprocess
+    from pathlib import Path as _Path
+    from fileformats.vendor.mrtrix3.medimage import ImageFormatGz as _MifGz
+
+    out_file = str(_Path.cwd() / "dwicat_out.mif.gz")
+    subprocess.run(["dwicat", str(input1), str(input2), out_file], check=True)
+    return _MifGz(out_file)
 
 
 @python.define(outputs=["out"])
@@ -1706,21 +1724,21 @@ def DWISeriesWorkflow(
     fwd_b0: NiftiGz | None = None,
     readout_time: float = 0.05,
     eddy_options: str = " --slm=linear",
-    processing_steps: list[str] | None = None,
+    do_denoise: bool = False,
+    do_degibbs: bool = False,
+    do_fslpreproc: bool = False,
+    do_biascorrect: bool = False,
     gradcheck: bool = False,
 ) -> tuple[NiftiGz, NiftiGz, NiftiGz, ImageOut]:
     """End-to-end DWI preprocessing + T1 coregistration + tensor metrics.
 
     Inputs are concrete typed fileformats objects — directory scanning and
     series classification happen in the CLI before this workflow is instantiated.
-    Conditional branches (``processing_steps``, ``gradcheck``, ``preproc_mode``)
-    are evaluated at graph-construction time using the concrete values provided.
+    Conditional branches (``do_*``, ``gradcheck``, ``preproc_mode``) are
+    evaluated at graph-construction time using the concrete values provided.
+    Individual bool flags are used instead of list[str] to avoid pydra
+    serialisation issues with list types across nested workflow boundaries.
     """
-    _steps = processing_steps or []
-    do_denoise = "dwidenoise" in _steps
-    do_degibbs = "mrgibbs" in _steps
-    do_fslpreproc = "dwifslpreproc" in _steps
-    do_biascorrect = "dwibiascorrect" in _steps
     from pydra.tasks.mrtrix3.v3_1 import (
         DwiDenoise,
         DwiBiascorrect_Ants,
@@ -1732,34 +1750,46 @@ def DWISeriesWorkflow(
         DwiGradcheck,
         MrDegibbs,
     )
-    from phantomkit.tasks.ants import DwiCatMulti
-
     # ── Optional gradient-table correction ───────────────────────────────────
     if gradcheck:
         gc = workflow.add(
             DwiGradcheck(in_file=dwi, export_grad_mrtrix=True, config=[]),
             name="gradcheck",
         )
-        # Re-embed corrected gradient orientations into a new MIF
         dwi_in = workflow.add(
             MrConvert(in_file=dwi, grad=gc.export_grad_mrtrix),
             name="embed_corrected_grads",
         ).out_file
+        # For rpe_all the RPE has the full multi-direction DWI series —
+        # apply gradcheck to it independently so each image carries its own
+        # corrected gradient table into the subsequent processing steps.
+        if rpe is not None and preproc_mode == "rpe_all":
+            gc_rpe = workflow.add(
+                DwiGradcheck(in_file=rpe, export_grad_mrtrix=True, config=[]),
+                name="gradcheck_rpe",
+            )
+            rpe_in = workflow.add(
+                MrConvert(in_file=rpe, grad=gc_rpe.export_grad_mrtrix),
+                name="embed_corrected_grads_rpe",
+            ).out_file
+        else:
+            rpe_in = rpe
     else:
         dwi_in = dwi
+        rpe_in = rpe
 
     # ── Optional denoising ────────────────────────────────────────────────────
     if do_denoise:
         dn = workflow.add(DwiDenoise(dwi=dwi_in), name="denoise")
         dwi_after_dn = dn.out
         if rpe is not None and preproc_mode == "rpe_all":
-            dn_rpe = workflow.add(DwiDenoise(dwi=rpe), name="denoise_rpe")
+            dn_rpe = workflow.add(DwiDenoise(dwi=rpe_in), name="denoise_rpe")
             rpe_after_dn = dn_rpe.out
         else:
-            rpe_after_dn = rpe
+            rpe_after_dn = rpe_in
     else:
         dwi_after_dn = dwi_in
-        rpe_after_dn = rpe
+        rpe_after_dn = rpe_in
 
     # ── Optional Gibbs ringing removal ───────────────────────────────────────
     if do_degibbs:
@@ -1778,12 +1808,12 @@ def DWISeriesWorkflow(
     if do_fslpreproc:
         if preproc_mode == "rpe_all" and rpe is not None:
             cat = workflow.add(
-                DwiCatMulti(inputs=[dwi_for_preproc, rpe_for_preproc]),
+                RunDwicat(input1=dwi_for_preproc, input2=rpe_for_preproc),
                 name="concat_ap_pa",
             )
             preproc = workflow.add(
                 RunDwifslpreproc(
-                    in_file=cat.out_file,
+                    in_file=cat.out,
                     pe_dir=dwi_pe_dir,
                     preproc_mode="rpe_all",
                     readout_time=readout_time,
@@ -1800,9 +1830,9 @@ def DWISeriesWorkflow(
                     MrConvert(in_file=fwd_b0), name="fwd_b0_to_mif"
                 )
                 se_epi = workflow.add(
-                    DwiCatMulti(inputs=[fwd_as_mif.out_file, rpe_b0.out_file]),
+                    RunDwicat(input1=fwd_as_mif.out_file, input2=rpe_b0.out_file),
                     name="se_epi_pair",
-                ).out_file
+                ).out
             else:
                 se_epi = rpe_b0.out_file
             preproc = workflow.add(

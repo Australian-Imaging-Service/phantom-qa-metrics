@@ -379,16 +379,10 @@ def view_mri(nifti_image: str, vials_dir: str | None, title: str, port: int) -> 
     default="",
     help=(
         "Comma-separated DWI processing steps to run. "
-        "Valid values: dwidenoise, mrgibbs, dwifslpreproc, dwibiascorrect. "
+        "Valid values: gradcheck, dwidenoise, mrgibbs, dwifslpreproc, dwibiascorrect. "
         "Example: --processing-steps dwidenoise,mrgibbs,dwifslpreproc,dwibiascorrect. "
         "Default: none (only tensor fitting is performed)."
     ),
-)
-@click.option(
-    "--gradcheck",
-    is_flag=True,
-    default=False,
-    help="Run dwigradcheck to verify gradient orientations.",
 )
 @click.option(
     "--nocleanup",
@@ -426,7 +420,6 @@ def run_pipeline(
     output_dir,
     phantom,
     processing_steps,
-    gradcheck,
     nocleanup,
     readout_time,
     eddy_options,
@@ -492,7 +485,7 @@ def run_pipeline(
     n_threads = _os.cpu_count() or 1
     _os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", str(n_threads))
 
-    _valid_steps = {"dwidenoise", "mrgibbs", "dwifslpreproc", "dwibiascorrect"}
+    _valid_steps = {"dwidenoise", "mrgibbs", "dwifslpreproc", "dwibiascorrect", "gradcheck"}
     _parsed_steps = [s.strip() for s in processing_steps.split(",") if s.strip()]
     _invalid = [s for s in _parsed_steps if s not in _valid_steps]
     if _invalid:
@@ -505,7 +498,7 @@ def run_pipeline(
         "scans_dir": str(input_path),
         "output_dir": str(output_path),
         "processing_steps": _parsed_steps,
-        "gradcheck": gradcheck,
+        "gradcheck": "gradcheck" in _parsed_steps,
         "keep_tmp": nocleanup,
         "readout_time": readout_time,
         "eddy_options": eddy_options or " --slm=linear",
@@ -619,6 +612,10 @@ def run_pipeline(
                     fwd_b0_img = NiftiGz(plan["fwd_pe_nii"])
 
                 # ── Build and submit PhantomKitWorkflow ──────────────────────
+                # Derive bool flags from _parsed_steps — passed as individual
+                # bools rather than list[str] to avoid pydra serialisation
+                # issues with list types crossing nested workflow boundaries.
+                _steps = plan["processing_steps"]
                 wf = PhantomKitWorkflow(
                     t1w=t1w,
                     phantom=phantom,
@@ -629,8 +626,11 @@ def run_pipeline(
                     fwd_b0=fwd_b0_img,
                     readout_time=plan["readout_time"],
                     eddy_options=plan["eddy_options"],
-                    processing_steps=_parsed_steps,
-                    gradcheck=gradcheck,
+                    do_denoise="dwidenoise" in _steps,
+                    do_degibbs="mrgibbs" in _steps,
+                    do_fslpreproc="dwifslpreproc" in _steps,
+                    do_biascorrect="dwibiascorrect" in _steps,
+                    gradcheck="gradcheck" in _steps,
                 )
                 cache_dir = str(series_out / ".pydra_cache")
                 with Submitter(worker=worker, cache_root=cache_dir) as sub:
