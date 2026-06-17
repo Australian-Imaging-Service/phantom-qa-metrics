@@ -33,7 +33,10 @@ RUN curl -fsSL \
     && bash /tmp/miniforge.sh -b -p /opt/conda \
     && rm /tmp/miniforge.sh
 
-RUN /opt/conda/bin/conda env create -p /opt/fsl \
+RUN /opt/conda/bin/conda config --set remote_max_retries 10 \
+    && /opt/conda/bin/conda config --set remote_connect_timeout_secs 60 \
+    && /opt/conda/bin/conda config --set remote_read_timeout_secs 600 \
+    && /opt/conda/bin/mamba env create -p /opt/fsl \
         -f "https://fsl.fmrib.ox.ac.uk/fsldownloads/fslconda/releases/fsl-${FSL_VERSION}_linux-64.yml" \
     && /opt/conda/bin/conda clean --all -y \
     && rm -rf /opt/conda
