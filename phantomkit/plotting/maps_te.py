@@ -167,6 +167,7 @@ def plot_vial_te_means_std(
     relaxometry_reference: dict | None = None,
     phantom: str | None = None,
     overlay_contrast: str | None = None,
+    scan_date: str | None = None,
 ):
     """
     Create interactive HTML or publication-quality PNG plots of vial intensity
@@ -315,6 +316,7 @@ def plot_vial_te_means_std(
         embedded_data = {
             "type": "maps_te",
             "phantom": phantom,
+            "scan_date": scan_date,
             "vial_groups": vial_groups,
             "contrast_numbers": contrast_numbers.tolist(),
             "mean_matrix": mean_matrix.tolist(),
