@@ -556,10 +556,24 @@ def run_stage3(
     for nii in sorted(staging_dir.glob("*.nii.gz")):
         print(f"    {nii.name}")
 
+    # Extract scan date from any dcm2niix JSON sidecar in the staging dir
+    scan_date: str | None = None
+    for jsn in staging_dir.glob("*.json"):
+        try:
+            import json as _json
+            raw_date = _json.loads(jsn.read_text()).get("StudyDate", "")
+            if isinstance(raw_date, str) and len(raw_date) == 8 and raw_date.isdigit():
+                scan_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
+                break
+        except Exception:
+            pass
+
     # Run phantom processor
     print(f"\n  Running PhantomProcessor:")
     print(f"    Input image: {t1_nii_path}")
     print(f"    Output base: {output_dir}")
+    if scan_date:
+        print(f"    Scan date:   {scan_date}")
 
     from phantomkit.phantom_processor import PhantomProcessor
 
@@ -568,6 +582,7 @@ def run_stage3(
         output_base_dir=str(output_dir),
         filename_prefix=input_identifier,
         n_threads=n_threads,
+        scan_date=scan_date,
     )
     processor.process_session(str(t1_nii_path))
 

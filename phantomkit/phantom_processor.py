@@ -989,6 +989,7 @@ def _task_generate_plots(
     output_format: str = "html",
     filename_prefix: str = "",
     rayleigh_correction: bool = False,
+    scan_date: str = "",
 ) -> str:
     """Generate per-contrast scatter plots and parametric map plots (IR / TE).
 
@@ -1079,6 +1080,7 @@ def _task_generate_plots(
                     output_format="html",
                     nifti_image=str(contrast_file),
                     vial_niftis=_vial_niftis_map or None,
+                    scan_date=scan_date or None,
                 )
                 print(f"    ✓ Generated HTML plot: {Path(output_plot).name}")
             except Exception as e:
@@ -1169,6 +1171,7 @@ def _task_generate_plots(
                     relaxometry_reference=_relaxometry_ref_t1 if contrast_type_key == "ir" else _relaxometry_ref_t2,
                     phantom=phantom_name,
                     overlay_contrast=str(first_file) if _t1_bg else None,
+                    scan_date=scan_date or None,
                 )
                 print(f"    ✓ Generated {contrast_type_key.upper()} HTML map plot")
             except Exception as e:
@@ -1381,6 +1384,7 @@ def PhantomSessionWf(
     filename_prefix: str = "",
     rayleigh_correction: bool = False,
     cpu_threads: int = 1,
+    scan_date: str = "",
 ) -> str:
     """
     End-to-end phantom QC workflow.
@@ -1455,6 +1459,7 @@ def PhantomSessionWf(
             output_format=output_format,
             filename_prefix=filename_prefix,
             rayleigh_correction=rayleigh_correction,
+            scan_date=scan_date,
         ),
         name="generate_plots",
     )
@@ -1518,6 +1523,7 @@ class PhantomProcessor:
         filename_prefix: str = "",
         rayleigh_correction: bool = False,
         n_threads: Optional[int] = None,
+        scan_date: str | None = None,
     ):
         self.template_dir = Path(template_dir)
         self.output_base_dir = Path(output_base_dir)
@@ -1525,6 +1531,7 @@ class PhantomProcessor:
         self.filename_prefix = filename_prefix
         self.rayleigh_correction = rayleigh_correction
         self.n_threads = n_threads if n_threads is not None else (os.cpu_count() or 1)
+        self.scan_date = scan_date or ""
 
         # Phantom name is the last component of template_dir (e.g. "SPIRIT")
         self.phantom_name = self.template_dir.name
@@ -1614,6 +1621,7 @@ class PhantomProcessor:
             filename_prefix=self.filename_prefix,
             rayleigh_correction=self.rayleigh_correction,
             cpu_threads=self.n_threads,
+            scan_date=self.scan_date,
         )
         cache_dir = output_dir / ".pydra_cache"
         if cache_dir.exists():

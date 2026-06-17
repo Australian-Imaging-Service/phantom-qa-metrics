@@ -487,6 +487,7 @@ def plot_vial_intensity(
     output_format: str = "html",
     nifti_image: str | None = None,
     vial_niftis: dict | None = None,
+    scan_date: str | None = None,
 ):
     """Plot vial vs intensity. Mode (ADC/FA/generic) auto-detected from csv_file name.
 
@@ -648,6 +649,7 @@ def plot_vial_intensity(
             "type": "vial_intensity",
             "contrast_mode": contrast_mode,
             "phantom": phantom,
+            "scan_date": scan_date,
             "vials": list(vials),
             "means": display_values.tolist(),
             "stds": display_stds.tolist() if display_stds is not None else None,
