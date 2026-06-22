@@ -4,15 +4,17 @@ longitudinal.py — Track phantom vial measurements over time.
 
 Reads the embedded phantomkit-data JSON from each HTML, extracts per-vial
 measurements (ADC, fitted T1, or fitted T2), and produces a new self-contained
-interactive HTML showing a single vial's value across scan dates.
+interactive HTML showing measurements across scan dates.
 
 Features
 --------
 * X-axis: date of scan (from embedded scan_date or --date CLI option)
 * Y-axis: metric value (ADC ×10⁻³ mm²/s, T1 ms, or T2 ms)
-* Vial selector dropdown: choose which vial to display
-* Reference line: temperature-dependent horizontal dashed line from calibration data
-* Toggle buttons to show/hide individual sessions
+* Single-vial panel: vial selector dropdown with session toggle buttons
+* All-vials panel: all vials shown simultaneously; each session = unique colour,
+  each vial = unique shape; per-vial reference lines; toggleable sessions & vials
+* Reference line(s): temperature-dependent from calibration data
+* Toggle buttons to show/hide individual sessions (synced across both panels)
 
 Registered as ``phantomkit plot longitudinal`` via CLI auto-discovery.
 """
@@ -34,6 +36,19 @@ from phantomkit.plotting.compare_plots import (
     _load_embedded,
     _load_reference,
 )
+
+# Chart.js pointStyle names and matching Unicode glyphs for vial shapes
+_VIAL_SHAPES = [
+    "circle",       # ●
+    "rect",         # ■
+    "triangle",     # ▲
+    "rectRot",      # ◆
+    "star",         # ★
+    "cross",        # ✚
+    "crossRot",     # ✕
+    "rectRounded",  # ▣
+]
+_VIAL_SYMBOLS = ["●", "■", "▲", "◆", "★", "✚", "✕", "▣"]
 
 
 # ---------------------------------------------------------------------------
@@ -100,10 +115,11 @@ def _build_html(
     title = f"Longitudinal: {metric} per vial"
 
     # -- JS data blobs
-    sessions_json   = json.dumps(sessions)
-    vial_list_json  = json.dumps(vial_list)
-    y_label_json    = json.dumps(y_label)
-    ref_color_json  = json.dumps(_REFERENCE_COLOR)
+    sessions_json    = json.dumps(sessions)
+    vial_list_json   = json.dumps(vial_list)
+    y_label_json     = json.dumps(y_label)
+    ref_color_json   = json.dumps(_REFERENCE_COLOR)
+    vial_shapes_json = json.dumps(_VIAL_SHAPES)
 
     ref_by_temp: dict[str, dict] = {}
     temperatures: list = []
@@ -113,13 +129,8 @@ def _build_html(
         temperatures = ref_data.get("temperatures", [])
         ref_by_temp  = ref_data.get("values_by_temp", {})
 
-    ref_by_temp_json   = json.dumps(ref_by_temp)
-    default_temp_json  = json.dumps(default_temp)
-
-    # -- Vial dropdown
-    vial_options = "".join(
-        f'<option value="{v}">{v}</option>' for v in vial_list
-    )
+    ref_by_temp_json  = json.dumps(ref_by_temp)
+    default_temp_json = json.dumps(default_temp)
 
     # -- Temperature selector
     temp_selector_html = ""
@@ -130,7 +141,7 @@ def _build_html(
             for t in temperatures
         )
         temp_selector_html = (
-            '\n    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;">'
+            '\n    <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px;">'
             + '<span style="font-size:14px;color:var(--text2);">Reference temperature:</span>'
             + '<select id="refTempSelect" onchange="pkSetRefTemp(this.value)"'
             + ' style="background:var(--bg3);color:var(--text);border:1px solid var(--border);'
@@ -160,56 +171,60 @@ def _build_html(
             f'</div>'
         )
 
-    # -- Reference legend entry
+    # -- Vial toggle buttons (single row, wrapping)
+    vial_controls_html = ""
+    for vi, vial in enumerate(vial_list):
+        sym = _VIAL_SYMBOLS[vi % len(_VIAL_SYMBOLS)]
+        vial_controls_html += (
+            f'<button id="pk-vial-btn-{vi}" data-visible="1" onclick="pkToggleVial({vi},this)"'
+            f' style="display:inline-flex;align-items:center;gap:6px;'
+            f'padding:5px 14px;border-radius:99px;border:1.5px solid var(--border);'
+            f'background:var(--bg3);color:var(--text);font-size:14px;font-weight:500;'
+            f'cursor:pointer;user-select:none;transition:opacity .15s;">'
+            f'<span style="font-size:15px;color:var(--text2);">{sym}</span>Vial {vial}</button>'
+        )
+
+    # -- Reference legend
     ref_legend_html = ""
     if ref_data is not None:
         ref_legend_html = (
             f'\n    <div style="display:flex;align-items:center;gap:12px;margin-bottom:10px;">'
             f'<span style="width:28px;height:3px;background:transparent;'
             f'border-top:2.5px dashed {_REFERENCE_COLOR};display:inline-block;flex-shrink:0;"></span>'
-            f'<span style="font-size:14px;color:var(--text2);">Reference</span></div>'
+            f'<span style="font-size:14px;color:var(--text2);">Reference (one line per vial)</span></div>'
         )
 
     head = html_head(title)
 
     return f"""{head}
 <body>
-<div class="page-wrap" style="max-width:960px;margin:0 auto;">
+<div class="page-wrap" style="max-width:1100px;margin:0 auto;">
   <h1>{title}</h1>
   <p class="subtitle">{y_label}</p>
 
   <div class="chart-card" style="margin-bottom:20px;">
     <p class="chart-title" style="font-size:15px;">Controls</p>
-
-    <div style="display:flex;align-items:center;gap:16px;margin-bottom:16px;flex-wrap:wrap;">
-      <label style="display:flex;align-items:center;gap:8px;font-size:14px;color:var(--text);">
-        Vial:
-        <select id="vialSelect" onchange="pkSetVial(this.value)"
-          style="background:var(--bg3);color:var(--text);border:1px solid var(--border);
-          border-radius:6px;padding:4px 12px;font-size:14px;cursor:pointer;">
-          {vial_options}
-        </select>
-      </label>
 {temp_selector_html}
-    </div>
-
+    <p style="font-size:13px;font-weight:500;color:var(--text2);margin-bottom:10px;">Sessions</p>
     <div id="pk-session-controls">
 {session_controls_html}
+    </div>
+
+    <p style="font-size:13px;font-weight:500;color:var(--text2);margin-bottom:10px;margin-top:16px;">Vials</p>
+    <div id="pk-vial-controls" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px;">
+{vial_controls_html}
 {ref_legend_html}
     </div>
   </div>
 
   <div class="chart-card">
-    <p id="vialSelectTitle" class="chart-title" style="font-size:15px;">
-      {metric} over time — Vial {vial_list[0] if vial_list else ""}
-    </p>
-    <div class="chart-wrap" style="height:480px;">
-      <canvas id="longChart"></canvas>
+    <p class="chart-title" style="font-size:15px;">{metric} over time &mdash; All Vials</p>
+    <div class="chart-wrap" style="height:520px;">
+      <canvas id="allVialsChart"></canvas>
     </div>
     <p style="font-size:13px;color:var(--text2);margin-top:8px;">
-      Click session buttons to toggle visibility &middot;
-      use the Vial dropdown to switch vials &middot;
-      scroll to zoom &middot; drag to pan
+      Colour = session &middot; shape = vial &middot;
+      toggle sessions/vials above &middot; scroll to zoom &middot; drag to pan
     </p>
   </div>
 </div>
@@ -219,168 +234,195 @@ const SESSIONS    = {sessions_json};
 const VIAL_LIST   = {vial_list_json};
 const REF_BY_TEMP = {ref_by_temp_json};
 const REF_COLOR   = {ref_color_json};
+const VIAL_SHAPES = {vial_shapes_json};
 let _pkRefTemp    = {default_temp_json};
-let _selectedVial = VIAL_LIST.length > 0 ? VIAL_LIST[0] : null;
 const METRIC_LABEL = {y_label_json};
 
 const isDark  = window.matchMedia("(prefers-color-scheme: dark)").matches;
 const gridCol = isDark ? "rgba(255,255,255,0.08)" : "rgba(0,0,0,0.07)";
 const tickCol = "#888780";
 
-// ---------------------------------------------------------------------------
-// Reference helpers
-// ---------------------------------------------------------------------------
-
-function _getRefVal(vial) {{
-  if (!REF_BY_TEMP || !_pkRefTemp || !vial) return null;
-  const byVial = REF_BY_TEMP[_pkRefTemp] || {{}};
-  const v = byVial[vial.toUpperCase()];
-  return v !== undefined ? v : null;
-}}
-
-function _refLineData() {{
-  const refVal = _getRefVal(_selectedVial);
-  if (refVal === null) return [];
-  const dateTimes = SESSIONS.map(function(s) {{ return s.date_ms; }});
-  if (dateTimes.length === 0) return [];
-  const xMin = Math.min.apply(null, dateTimes);
-  const xMax = Math.max.apply(null, dateTimes);
-  const pad  = Math.max((xMax - xMin) * 0.12, 7 * 86400000);  // at least 7 days
-  return [{{x: xMin - pad, y: refVal}}, {{x: xMax + pad, y: refVal}}];
-}}
-
-// ---------------------------------------------------------------------------
-// Dataset builders
-// ---------------------------------------------------------------------------
-
-const REF_DS_IDX = SESSIONS.length;
-
-function _sessionDatasets() {{
-  return SESSIONS.map(function(sess, i) {{
-    const y = sess.vals[_selectedVial];
-    const hidden = chart ? chart.data.datasets[i].hidden : false;
-    return {{
-      label: sess.label,
-      data: (y !== null && y !== undefined) ? [{{x: sess.date_ms, y: parseFloat(y.toFixed(4))}}] : [],
-      backgroundColor: sess.color,
-      borderColor: sess.color,
-      pointBackgroundColor: sess.color,
-      pointBorderColor: sess.color,
-      pointRadius: 8,
-      pointHoverRadius: 10,
-      pointStyle: "circle",
-      showLine: false,
-      borderWidth: 0,
-      hidden: hidden,
-    }};
-  }});
-}}
-
-function _refDataset() {{
-  return {{
-    label: "Reference",
-    data: _refLineData(),
-    borderColor: REF_COLOR,
-    borderWidth: 2.5,
-    borderDash: [8, 4],
-    pointRadius: 0,
-    pointHoverRadius: 0,
-    showLine: true,
-    fill: false,
-    backgroundColor: "transparent",
-    tension: 0,
-  }};
-}}
-
-// ---------------------------------------------------------------------------
-// Date tick formatter
-// ---------------------------------------------------------------------------
-
 function _fmtDate(ms) {{
   const d = new Date(ms);
   return d.toLocaleDateString("en-US", {{year: "numeric", month: "short", day: "numeric"}});
 }}
 
+function _dateRange() {{
+  const ts = SESSIONS.map(function(s) {{ return s.date_ms; }});
+  if (!ts.length) return {{xMin: 0, xMax: 1, pad: 86400000}};
+  const xMin = Math.min.apply(null, ts);
+  const xMax = Math.max.apply(null, ts);
+  return {{xMin: xMin, xMax: xMax, pad: Math.max((xMax - xMin) * 0.12, 7 * 86400000)}};
+}}
+
 // ---------------------------------------------------------------------------
-// Chart initialisation
+// Visibility state
+// ---------------------------------------------------------------------------
+
+let _sessVisible = new Array(SESSIONS.length).fill(true);
+let _vialVisible = new Array(VIAL_LIST.length).fill(true);
+
+// ---------------------------------------------------------------------------
+// Dataset builders
+// ---------------------------------------------------------------------------
+
+function _buildDataDatasets() {{
+  const datasets = [];
+  SESSIONS.forEach(function(sess, si) {{
+    VIAL_LIST.forEach(function(vial, vi) {{
+      const y = sess.vals[vial];
+      if (y === null || y === undefined) return;
+      datasets.push({{
+        pk_type: "data",
+        pk_session_idx: si,
+        pk_vial_idx: vi,
+        label: sess.label + " — Vial " + vial,
+        data: [{{x: sess.date_ms, y: parseFloat(y.toFixed(4))}}],
+        backgroundColor: sess.color,
+        borderColor: sess.color,
+        pointBackgroundColor: sess.color,
+        pointBorderColor: sess.color,
+        pointBorderWidth: 2.5,
+        pointStyle: VIAL_SHAPES[vi % VIAL_SHAPES.length],
+        pointRadius: 9,
+        pointHoverRadius: 11,
+        showLine: false,
+        borderWidth: 0,
+        hidden: false,
+      }});
+    }});
+  }});
+  return datasets;
+}}
+
+function _buildRefDatasets() {{
+  if (!REF_BY_TEMP || !_pkRefTemp) return [];
+  const byVial = REF_BY_TEMP[_pkRefTemp] || {{}};
+  const r = _dateRange();
+  const datasets = [];
+  VIAL_LIST.forEach(function(vial, vi) {{
+    const refVal = byVial[vial.toUpperCase()];
+    if (refVal === undefined || refVal === null) return;
+    datasets.push({{
+      pk_type: "ref",
+      pk_vial_idx: vi,
+      label: "Ref Vial " + vial,
+      data: [{{x: r.xMin - r.pad, y: refVal}}, {{x: r.xMax + r.pad, y: refVal}}],
+      borderColor: REF_COLOR,
+      borderWidth: 1.5,
+      borderDash: [8, 4],
+      pointRadius: 0,
+      pointHoverRadius: 0,
+      showLine: true,
+      fill: false,
+      backgroundColor: "transparent",
+      tension: 0,
+      hidden: false,
+    }});
+  }});
+  return datasets;
+}}
+
+// ---------------------------------------------------------------------------
+// Chart
 // ---------------------------------------------------------------------------
 
 let chart;
 
-const ctx = document.getElementById("longChart").getContext("2d");
-chart = new Chart(ctx, {{
-  type: "scatter",
-  data: {{ datasets: [..._sessionDatasets(), _refDataset()] }},
-  options: {{
-    responsive: true,
-    maintainAspectRatio: false,
-    plugins: {{
-      legend: {{ display: false }},
-      tooltip: {{
-        callbacks: {{
-          label: function(ctx) {{
-            if (ctx.dataset.label === "Reference") return null;
-            return ctx.dataset.label + " — " + _fmtDate(ctx.parsed.x) + ": " + ctx.parsed.y.toFixed(3);
+(function() {{
+  const ctx = document.getElementById("allVialsChart").getContext("2d");
+  chart = new Chart(ctx, {{
+    type: "scatter",
+    data: {{ datasets: [..._buildDataDatasets(), ..._buildRefDatasets()] }},
+    options: {{
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {{
+        legend: {{ display: false }},
+        tooltip: {{
+          callbacks: {{
+            label: function(ctx) {{
+              if (ctx.dataset.pk_type === "ref") {{
+                return ctx.dataset.label + ": " + ctx.parsed.y.toFixed(3);
+              }}
+              return ctx.dataset.label + " — " + _fmtDate(ctx.parsed.x) + ": " + ctx.parsed.y.toFixed(3);
+            }}
           }}
+        }},
+        zoom: {{
+          zoom: {{ wheel: {{ enabled: true }}, pinch: {{ enabled: true }}, mode: "xy" }},
+          pan:  {{ enabled: true, mode: "xy" }},
         }}
       }},
-      zoom: {{
-        zoom: {{ wheel: {{ enabled: true }}, pinch: {{ enabled: true }}, mode: "xy" }},
-        pan:  {{ enabled: true, mode: "xy" }},
+      scales: {{
+        x: {{
+          type: "linear",
+          title: {{ display: true, text: "Date", color: tickCol, font: {{ size: 15 }} }},
+          ticks: {{
+            color: tickCol,
+            font: {{ size: 13 }},
+            maxTicksLimit: 8,
+            callback: function(v) {{ return _fmtDate(v); }}
+          }},
+          grid: {{ color: gridCol }},
+        }},
+        y: {{
+          title: {{ display: true, text: METRIC_LABEL, color: tickCol, font: {{ size: 15 }} }},
+          ticks: {{ color: tickCol, font: {{ size: 14 }} }},
+          grid: {{ color: gridCol }},
+        }}
       }}
     }},
-    scales: {{
-      x: {{
-        type: "linear",
-        title: {{ display: true, text: "Date", color: tickCol, font: {{ size: 15 }} }},
-        ticks: {{
-          color: tickCol,
-          font: {{ size: 13 }},
-          maxTicksLimit: 8,
-          callback: function(v) {{ return _fmtDate(v); }}
-        }},
-        grid: {{ color: gridCol }},
-      }},
-      y: {{
-        title: {{ display: true, text: METRIC_LABEL, color: tickCol, font: {{ size: 15 }} }},
-        ticks: {{ color: tickCol, font: {{ size: 14 }} }},
-        grid: {{ color: gridCol }},
-      }}
-    }}
-  }},
-}});
+  }});
+}})();
 
 // ---------------------------------------------------------------------------
 // Interactivity
 // ---------------------------------------------------------------------------
 
-function pkSetVial(vial) {{
-  _selectedVial = vial;
-  document.getElementById("vialSelectTitle").textContent =
-    "{metric} over time — Vial " + vial;
-
-  SESSIONS.forEach(function(sess, i) {{
-    const y = sess.vals[vial.toUpperCase()];
-    chart.data.datasets[i].data =
-      (y !== null && y !== undefined) ? [{{x: sess.date_ms, y: parseFloat(y.toFixed(4))}}] : [];
+function _updateVisibility() {{
+  chart.data.datasets.forEach(function(ds) {{
+    if (ds.pk_type === "data") {{
+      ds.hidden = !_sessVisible[ds.pk_session_idx] || !_vialVisible[ds.pk_vial_idx];
+    }} else if (ds.pk_type === "ref") {{
+      ds.hidden = !_vialVisible[ds.pk_vial_idx];
+    }}
   }});
-
-  chart.data.datasets[REF_DS_IDX].data = _refLineData();
   chart.update();
+}}
+
+function _updateRefDatasets() {{
+  const byVial = (REF_BY_TEMP && _pkRefTemp) ? (REF_BY_TEMP[_pkRefTemp] || {{}}) : {{}};
+  const r = _dateRange();
+  chart.data.datasets.forEach(function(ds) {{
+    if (ds.pk_type !== "ref") return;
+    const vial = VIAL_LIST[ds.pk_vial_idx];
+    if (!vial) return;
+    const refVal = byVial[vial.toUpperCase()];
+    ds.data = (refVal !== undefined && refVal !== null)
+      ? [{{x: r.xMin - r.pad, y: refVal}}, {{x: r.xMax + r.pad, y: refVal}}]
+      : [];
+  }});
+  chart.update("none");
 }}
 
 function pkSetRefTemp(temp) {{
   _pkRefTemp = temp;
-  chart.data.datasets[REF_DS_IDX].data = _refLineData();
-  chart.update("none");
+  _updateRefDatasets();
 }}
 
 function pkToggleSession(idx, btn) {{
-  const ds = chart.data.datasets[idx];
-  ds.hidden = !ds.hidden;
-  btn.setAttribute("data-visible", ds.hidden ? "0" : "1");
-  btn.style.opacity = ds.hidden ? "0.35" : "1.0";
-  chart.update();
+  _sessVisible[idx] = !_sessVisible[idx];
+  btn.setAttribute("data-visible", _sessVisible[idx] ? "1" : "0");
+  btn.style.opacity = _sessVisible[idx] ? "1.0" : "0.35";
+  _updateVisibility();
+}}
+
+function pkToggleVial(idx, btn) {{
+  _vialVisible[idx] = !_vialVisible[idx];
+  btn.setAttribute("data-visible", _vialVisible[idx] ? "1" : "0");
+  btn.style.opacity = _vialVisible[idx] ? "1.0" : "0.35";
+  _updateVisibility();
 }}
 </script>
 </body>
