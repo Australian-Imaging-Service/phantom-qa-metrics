@@ -1044,7 +1044,9 @@ def _task_generate_plots(
     # ── Per-contrast scatter plots ────────────────────────────────────────────
     for contrast_file in contrast_file_paths:
         is_ir_or_te = (
-            _matches(contrast_file.stem, "ir") or _matches(contrast_file.stem, "te")
+            _matches(contrast_file.stem, "ir")
+            or _matches(contrast_file.stem, "ti")
+            or _matches(contrast_file.stem, "te")
         )
         contrast_name = contrast_file.name
         for _ext in (".nii.gz", ".nii"):
@@ -1136,9 +1138,15 @@ def _task_generate_plots(
         ("ir", plot_vial_ir_means_std),
         ("te", plot_vial_te_means_std),
     ]:
-        matching = [
-            f for f in contrast_file_paths if _matches(f.stem, contrast_type_key)
-        ]
+        if contrast_type_key == "ir":
+            matching = [
+                f for f in contrast_file_paths
+                if _matches(f.stem, "ir") or _matches(f.stem, "ti")
+            ]
+        else:
+            matching = [
+                f for f in contrast_file_paths if _matches(f.stem, contrast_type_key)
+            ]
         if not matching:
             continue
 
