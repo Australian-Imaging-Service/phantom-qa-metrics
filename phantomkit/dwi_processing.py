@@ -362,13 +362,13 @@ def convert_series_to_nii(series_dir: str, out_dir: str) -> dict:
 
 def scan_directory(scans_dir: str) -> dict:
     """
-    First pass: classify subdirectories into t1_dirs, candidate_dwi (all series
+    First pass: classify subdirectories into mprage_dirs, candidate_dwi (all series
     containing _diff_ or _DWI_), and ignored. PE classification is PROVISIONAL
     at this stage — final assignment happens after series staging in
     classify_candidates().
     """
     scans_path = Path(scans_dir)
-    t1_dirs = []
+    mprage_dirs = []
     candidate_dwi = []  # all _diff_ / _DWI_ series, including PE images
     ignored = []
 
@@ -377,9 +377,9 @@ def scan_directory(scans_dir: str) -> dict:
             continue
         name = d.name
 
-        # T1
-        if re.search(r"t1", name, re.IGNORECASE):
-            t1_dirs.append(str(d))
+        # MPRAGE structural reference
+        if re.search(r"MPRAGE", name, re.IGNORECASE):
+            mprage_dirs.append(str(d))
             continue
 
         # Skip scanner-derived maps
@@ -394,13 +394,13 @@ def scan_directory(scans_dir: str) -> dict:
 
         candidate_dwi.append(str(d))
 
-    if not t1_dirs:
-        raise ValueError(f"Could not identify any T1 directory in {scans_dir}")
+    if not mprage_dirs:
+        raise ValueError(f"Could not identify any MPRAGE directory in {scans_dir}")
     if not candidate_dwi:
         raise ValueError(f"Could not identify any DWI directories in {scans_dir}")
 
     return {
-        "t1_dirs": t1_dirs,
+        "mprage_dirs": mprage_dirs,
         "candidate_dwi": candidate_dwi,
         "ignored": ignored,
     }
@@ -611,20 +611,20 @@ def match_ap_pa_pairs(
 # =============================================================================
 
 
-def assign_t1(dwi_name: str, t1_dirs: list) -> str:
+def assign_mprage(dwi_name: str, mprage_dirs: list) -> str:
     """
-    Assign the nearest preceding T1 by series number.
-    Falls back to the first T1 if none precedes the DWI.
+    Assign the nearest preceding MPRAGE by series number.
+    Falls back to the first MPRAGE if none precedes the DWI.
     """
     dwi_num = get_series_number(dwi_name)
     best = None
     best_num = -1
-    for t1 in t1_dirs:
-        t1_num = get_series_number(Path(t1).name)
-        if t1_num < dwi_num and t1_num > best_num:
-            best_num = t1_num
-            best = t1
-    return best if best is not None else t1_dirs[0]
+    for mprage in mprage_dirs:
+        mprage_num = get_series_number(Path(mprage).name)
+        if mprage_num < dwi_num and mprage_num > best_num:
+            best_num = mprage_num
+            best = mprage
+    return best if best is not None else mprage_dirs[0]
 
 
 def build_pe_assignment_map(
@@ -864,7 +864,7 @@ def resolve_pe_direction(dwi_name: str, dwi_json: str) -> tuple:
 
 def plan_workflow(
     dwi_dir: str,
-    t1_dirs: list,
+    mprage_dirs: list,
     fwd_pe_dirs: list,
     rpe_dirs: list,
     rpe_all_map: dict,
@@ -890,8 +890,8 @@ def plan_workflow(
     tmp_dir = str(Path(out_dir) / "tmp")
     os.makedirs(tmp_dir, exist_ok=True)
 
-    # T1 assignment
-    t1_dir = assign_t1(dwi_name, t1_dirs)
+    # MPRAGE assignment
+    t1_dir = assign_mprage(dwi_name, mprage_dirs)
 
     # PE direction (#9)
     warnings = []
@@ -2401,7 +2401,7 @@ def run_pipeline(cfg: dict):
     # Step 1: classify directories (provisional)
     dirs = scan_directory(scans_dir)
     print(f"\nFound:")
-    print(f"  {len(dirs['t1_dirs'])} T1 series")
+    print(f"  {len(dirs['mprage_dirs'])} MPRAGE series")
     print(f"  {len(dirs['candidate_dwi'])} candidate DWI series (before filtering)")
     if dirs["ignored"]:
         print(f"  {len(dirs['ignored'])} ignored (non-DWI)")
@@ -2448,7 +2448,7 @@ def run_pipeline(cfg: dict):
     for dwi_dir in dwi_dirs:
         plan = plan_workflow(
             dwi_dir=dwi_dir,
-            t1_dirs=dirs["t1_dirs"],
+            mprage_dirs=dirs["mprage_dirs"],
             fwd_pe_dirs=fwd_pe_dirs,
             rpe_dirs=rpe_dirs,
             rpe_all_map=rpe_all_map,
