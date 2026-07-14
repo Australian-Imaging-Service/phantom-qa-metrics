@@ -396,8 +396,6 @@ def scan_directory(scans_dir: str) -> dict:
 
     if not t1_dirs:
         raise ValueError(f"Could not identify any T1 directory in {scans_dir}")
-    if not candidate_dwi:
-        raise ValueError(f"Could not identify any DWI directories in {scans_dir}")
 
     return {
         "t1_dirs": t1_dirs,

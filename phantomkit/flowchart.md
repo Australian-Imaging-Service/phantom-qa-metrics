@@ -65,9 +65,17 @@ flowchart TD
         FWDXFM -->|sentinel| CLEANUP
     end
 
+    COPY --> S4
+
+    subgraph S4["Stage 4 — Calibration Temperature Estimation  (pipeline.py)"]
+        direction TB
+        TEMP["run_stage4()<br/>Compare per-vial ADC metrics vs adc_reference.json<br/>→ temperature_estimate.csv"]
+    end
+
     S1 -.->|"runs in parallel"| S3
+    S4 -.->|"runs after Stage 1"| DONE
     S2 -.->|"runs after Stage 1"| DONE
     S3 -.-> DONE
 
-    DONE(["outputs/<br/>  {session}/metrics/plots/*.html<br/>     scatter plots · T1_mapping · T2_mapping<br/>  {session}/metrics/fits/*.csv<br/>  {session}/metrics/csv/<br/>  {session}/vial_segmentations/<br/>  {session}/images_template_space/<br/>  {session}/TemplatePhantom_ScannerSpace.nii.gz"])
+    DONE(["outputs/<br/>  {session}/metrics/plots/*.html<br/>     scatter plots · T1_mapping · T2_mapping · DWI SNR/CNR<br/>  {session}/metrics/fits/*.csv<br/>  {session}/metrics/csv/<br/>  {session}/metrics/temperature_estimate.csv<br/>  {session}/vial_segmentations/<br/>  {session}/images_template_space/<br/>  {session}/TemplatePhantom_ScannerSpace.nii.gz"])
 ```
