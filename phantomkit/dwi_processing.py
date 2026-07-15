@@ -1387,6 +1387,11 @@ def run_dwifslpreproc(
     eddy_options: str,
     scratch_dir: str = "",
 ) -> str:
+    import os
+    if "--nthr" not in eddy_options:
+        ncores = os.cpu_count() or 1
+        eddy_options = eddy_options.rstrip() + f" --nthr={ncores}"
+        print(f"    eddy: using {ncores} CPU thread(s) (--nthr={ncores})")
     scratch_dir = scratch_dir or str(Path(out_mif).parent / "dwifslpreproc_scratch")
     cmd = [
         "dwifslpreproc",
@@ -1632,6 +1637,10 @@ def RunDwifslpreproc(
         cmd += ["-readout_time", str(readout_time)]
 
     if eddy_options:
+        import os as _os
+        if "--nthr" not in eddy_options:
+            ncores = _os.cpu_count() or 1
+            eddy_options = eddy_options.rstrip() + f" --nthr={ncores}"
         # Prepend a space so MRtrix3's argparse treats the value as a positional
         # string and not an option flag (values starting with '--' are misread).
         cmd += ["-eddy_options", f" {eddy_options.strip()}"]
