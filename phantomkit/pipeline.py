@@ -234,14 +234,14 @@ def stage_series_dir(series_dir: Path, out_dir: Path) -> list:
 def scan_input_dir(input_dir: Path) -> dict:
     """
     Classify subdirectories in input_dir into:
-      t1_dirs      – folders matching 't1' (case-insensitive)
-      ir_dirs      – folders matching 'se_ir' or standalone 'ir'
+      mprage_dirs  – folders matching 'MPRAGE' (case-insensitive)
+      ti_dirs      – folders matching 'T1_MAPS' or standalone 'TI'
       te_dirs      – folders matching 't2_se' or standalone 'te'
       dwi_dirs     – folders matching '_diff_' or '_DWI_' (case-insensitive)
                      AND not ending in _ADC or _FA
       other_dirs   – everything else
     """
-    t1_dirs, ir_dirs, te_dirs, dwi_dirs, other_dirs = [], [], [], [], []
+    mprage_dirs, ti_dirs, te_dirs, dwi_dirs, other_dirs = [], [], [], [], []
 
     for d in sorted(input_dir.iterdir()):
         if not d.is_dir():
@@ -252,10 +252,10 @@ def scan_input_dir(input_dir: Path) -> dict:
             other_dirs.append(d)
             continue
 
-        if re.search(r"t1", name, re.IGNORECASE):
-            t1_dirs.append(d)
-        elif re.search(r"se_ir|(?<![a-z0-9])ir(?![a-z0-9])", name, re.IGNORECASE):
-            ir_dirs.append(d)
+        if re.search(r"MPRAGE", name, re.IGNORECASE):
+            mprage_dirs.append(d)
+        elif re.search(r"T1_MAPS|(?<![a-z0-9])TI(?![a-z0-9])", name, re.IGNORECASE):
+            ti_dirs.append(d)
         elif re.search(r"t2_se|(?<![a-z0-9])te(?![a-z0-9])", name, re.IGNORECASE):
             te_dirs.append(d)
         elif re.search(r"(_diff_|_DWI_)", name, re.IGNORECASE):
@@ -264,13 +264,13 @@ def scan_input_dir(input_dir: Path) -> dict:
             other_dirs.append(d)
 
     return {
-        "t1_dirs": t1_dirs,
-        "ir_dirs": ir_dirs,
+        "mprage_dirs": mprage_dirs,
+        "ti_dirs": ti_dirs,
         "te_dirs": te_dirs,
         "dwi_dirs": dwi_dirs,
         "other_dirs": other_dirs,
         "has_dwi": bool(dwi_dirs),
-        "has_native_contrasts": bool(ir_dirs or te_dirs),
+        "has_native_contrasts": bool(ti_dirs or te_dirs),
     }
 
 
@@ -494,12 +494,12 @@ def run_stage3(
     """
     print_header("STAGE 3 — Phantom QC on Native Contrasts")
 
-    t1_dirs = scan_info["t1_dirs"]
-    ir_dirs = scan_info["ir_dirs"]
+    mprage_dirs = scan_info["mprage_dirs"]
+    ti_dirs = scan_info["ti_dirs"]
     te_dirs = scan_info["te_dirs"]
 
-    if not t1_dirs:
-        print("  No T1 directory found — cannot run Stage 3.\n")
+    if not mprage_dirs:
+        print("  No MPRAGE directory found — cannot run Stage 3.\n")
         return
 
     session_name = derive_session_name(input_dir)
@@ -507,8 +507,8 @@ def run_stage3(
 
     print(f"  Session name:    {session_name}")
     print(f"  Staging folder:  {staging_dir}")
-    print(f"  T1 dirs:         {[d.name for d in t1_dirs]}")
-    print(f"  IR dirs:         {[d.name for d in ir_dirs]}")
+    print(f"  MPRAGE dirs:     {[d.name for d in mprage_dirs]}")
+    print(f"  TI dirs:         {[d.name for d in ti_dirs]}")
     print(f"  TE dirs:         {[d.name for d in te_dirs]}")
     print()
 
@@ -517,8 +517,8 @@ def run_stage3(
         m = re.match(r"^(\d+)-", d.name)
         return int(m.group(1)) if m else 0
 
-    primary_t1_dir = sorted(t1_dirs, key=_series_num)[0]
-    contrast_dirs_to_convert = [primary_t1_dir] + ir_dirs + te_dirs
+    primary_mprage_dir = sorted(mprage_dirs, key=_series_num)[0]
+    contrast_dirs_to_convert = [primary_mprage_dir] + ti_dirs + te_dirs
 
     if dry_run:
         print("  [DRY RUN] Would stage series to NIfTI and place in staging folder:")
@@ -538,11 +538,11 @@ def run_stage3(
         try:
             produced = stage_series_dir(series_dir, staging_dir)
             print(f"    Produced: {[Path(p).name for p in produced]}")
-            if series_dir == primary_t1_dir:
+            if series_dir == primary_mprage_dir:
                 t1_nii_path = Path(produced[0])
         except Exception as e:
             print(f"  WARNING: Staging failed for {series_dir.name}: {e}")
-            if series_dir == primary_t1_dir:
+            if series_dir == primary_mprage_dir:
                 print("  Cannot proceed with Stage 3 without a T1 image.")
                 shutil.rmtree(staging_dir, ignore_errors=True)
                 return
@@ -839,11 +839,11 @@ def run_full_pipeline(
     print(f"  Template dir:        {template_dir}")
     print(f"  Output dir:          {output_dir}")
     print()
-    print(f"  T1 directories:      {len(scan_info['t1_dirs'])}")
-    for d in scan_info["t1_dirs"]:
+    print(f"  MPRAGE directories:  {len(scan_info['mprage_dirs'])}")
+    for d in scan_info["mprage_dirs"]:
         print(f"    {d.name}")
-    print(f"  IR directories:      {len(scan_info['ir_dirs'])}")
-    for d in scan_info["ir_dirs"]:
+    print(f"  TI directories:      {len(scan_info['ti_dirs'])}")
+    for d in scan_info["ti_dirs"]:
         print(f"    {d.name}")
     print(f"  TE directories:      {len(scan_info['te_dirs'])}")
     for d in scan_info["te_dirs"]:
@@ -855,7 +855,7 @@ def run_full_pipeline(
     print()
 
     run_stage1_flag = scan_info["has_dwi"]
-    run_stage3_flag = bool(scan_info["t1_dirs"]) and (
+    run_stage3_flag = bool(scan_info["mprage_dirs"]) and (
         scan_info["has_native_contrasts"] or not run_stage1_flag
     )
 
@@ -869,7 +869,7 @@ def run_full_pipeline(
     )
     print(
         f"  Stage 3 (phantom QC, native T1):  "
-        f"{'YES' if run_stage3_flag else 'NO (no T1/IR/TE found)'}"
+        f"{'YES' if run_stage3_flag else 'NO (no MPRAGE/TI/TE found)'}"
     )
     print(
         f"  Stage 4 (calibration temp. est.): "
@@ -901,10 +901,10 @@ def run_full_pipeline(
         run_stage3(input_dir, output_dir, template_dir, scan_info, dry_run, input_identifier, n_threads)
     else:
         print_header("STAGE 3 — Phantom QC on Native Contrasts")
-        if not scan_info["t1_dirs"]:
-            print("  Skipped: no T1 directory found.\n")
+        if not scan_info["mprage_dirs"]:
+            print("  Skipped: no MPRAGE directory found.\n")
         else:
-            print("  Skipped: no IR or TE series found, and DWI pipeline was run.\n")
+            print("  Skipped: no TI or TE series found, and DWI pipeline was run.\n")
 
     # Stage 4 — Calibration temperature estimation (requires Stage 1/2 ADC output)
     if run_stage1_flag:

@@ -510,7 +510,7 @@ def run_pipeline(
     scan_info = scan_input_dir(input_path)
 
     has_dwi = bool(dirs["candidate_dwi"])
-    has_native = bool(scan_info.get("t1_dirs")) and (
+    has_native = bool(scan_info.get("mprage_dirs")) and (
         scan_info.get("has_native_contrasts") or not has_dwi
     )
 
@@ -552,7 +552,7 @@ def run_pipeline(
             plans = [
                 plan_workflow(
                     dwi_dir=dwi_dir,
-                    t1_dirs=dirs["t1_dirs"],
+                    mprage_dirs=dirs["mprage_dirs"],
                     fwd_pe_dirs=fwd_pe_dirs,
                     rpe_dirs=rpe_dirs,
                     rpe_all_map=rpe_all_map,
