@@ -1239,7 +1239,7 @@ def _task_generate_plots(
 
     # ── T1/T2 SNR/CNR HTML ────────────────────────────────────────────────────
     _te_files = [f for f in contrast_file_paths if _matches(f.stem, "te")]
-    _ir_files = [f for f in contrast_file_paths if _matches(f.stem, "ir")]
+    _ir_files = [f for f in contrast_file_paths if _matches(f.stem, "ir") or _matches(f.stem, "ti")]
     if (_te_files or _ir_files) and output_format == "html":
         try:
             _process_t1t2_snrcnr_html(
