@@ -1565,7 +1565,11 @@ class PhantomProcessor:
         if len(self.vial_masks) == 0:
             raise FileNotFoundError(f"No vial masks found in: {self.vial_dir}")
 
-    def process_session(self, input_image: str) -> Dict:
+    def process_session(
+        self,
+        input_image: str,
+        output_dir: Optional[Path] = None,
+    ) -> Dict:
         """
         Process a single phantom session end-to-end using a Pydra workflow.
 
@@ -1583,6 +1587,9 @@ class PhantomProcessor:
         ----------
         input_image:
             Path to the primary input image (T1 MPRAGE or T1 in DWI space).
+        output_dir:
+            Override the output directory. When None (default) the directory is
+            derived as ``output_base_dir / input_path.parent.name``.
 
         Returns
         -------
@@ -1592,7 +1599,10 @@ class PhantomProcessor:
         input_path = Path(input_image)
         session_name = input_path.parent.name
 
-        output_dir = self.output_base_dir / session_name
+        if output_dir is None:
+            output_dir = self.output_base_dir / session_name
+        else:
+            output_dir = Path(output_dir)
         tmp_dir = output_dir / "tmp"
         vial_dir = output_dir / "vial_segmentations"
         metrics_dir = output_dir / "metrics"

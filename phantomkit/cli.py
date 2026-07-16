@@ -311,6 +311,21 @@ _register_plot_commands()
 
 
 # ---------------------------------------------------------------------------
+# GUI command — CustomTkinter launcher
+# ---------------------------------------------------------------------------
+
+
+@main.command("gui")
+def launch_gui() -> None:
+    """Launch the PhantomKit graphical user interface."""
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+    gui_script = _Path(__file__).parent / "gui.py"
+    subprocess.run([sys.executable, str(gui_script)], check=False)
+
+
+# ---------------------------------------------------------------------------
 # View command — NiceGUI MRI viewer
 # ---------------------------------------------------------------------------
 

@@ -85,6 +85,7 @@ docs = [
 
 [project.scripts]
 phantomkit = "phantomkit.cli:main"
+phantomkit-gui = "phantomkit.gui:main"
 
 [project.urls]
 repository = "https://github.com/Australian-Imaging-Service/phantomkit"

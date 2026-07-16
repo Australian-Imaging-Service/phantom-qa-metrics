@@ -197,6 +197,9 @@ def stage_series_dir(series_dir: Path, out_dir: Path) -> list:
                 ["mrconvert", str(nii), str(dst)], check=True, capture_output=True
             )
             produced.append(str(dst))
+        # Copy JSON sidecars so StudyDate is available for longitudinal plots
+        for jsn in sorted(series_dir.glob("*.json")):
+            shutil.copy2(jsn, out_dir / jsn.name)
         if not produced:
             raise FileNotFoundError(f"No NIfTI files found in {series_dir}")
         return produced
@@ -235,7 +238,7 @@ def scan_input_dir(input_dir: Path) -> dict:
     """
     Classify subdirectories in input_dir into:
       mprage_dirs  – folders matching 'MPRAGE' (case-insensitive)
-      ti_dirs      – folders matching 'T1_MAPS' or standalone 'TI'
+      ti_dirs      – folders matching 'T1_MAPS', 'se_ir', or standalone 'TI'
       te_dirs      – folders matching 't2_se' or standalone 'te'
       dwi_dirs     – folders matching '_diff_' or '_DWI_' (case-insensitive)
                      AND not ending in _ADC or _FA
@@ -254,7 +257,7 @@ def scan_input_dir(input_dir: Path) -> dict:
 
         if re.search(r"MPRAGE", name, re.IGNORECASE):
             mprage_dirs.append(d)
-        elif re.search(r"T1_MAPS|(?<![a-z0-9])TI(?![a-z0-9])", name, re.IGNORECASE):
+        elif re.search(r"T1_MAPS|se_ir|(?<![a-z0-9])TI(?![a-z0-9])", name, re.IGNORECASE):
             ti_dirs.append(d)
         elif re.search(r"t2_se|(?<![a-z0-9])te(?![a-z0-9])", name, re.IGNORECASE):
             te_dirs.append(d)
@@ -556,17 +559,49 @@ def run_stage3(
     for nii in sorted(staging_dir.glob("*.nii.gz")):
         print(f"    {nii.name}")
 
-    # Extract scan date from any dcm2niix JSON sidecar in the staging dir
-    scan_date: str | None = None
-    for jsn in staging_dir.glob("*.json"):
+    # Extract scan date from JSON sidecars — check staging dir first (dcm2niix
+    # output), then fall back to the original source directories.
+    import json as _json
+
+    def _date_from_jsons(search_dirs):
+        for d in search_dirs:
+            for jsn in sorted(Path(d).glob("*.json")):
+                try:
+                    raw = _json.loads(jsn.read_text()).get("StudyDate", "")
+                    if isinstance(raw, str) and len(raw) == 8 and raw.isdigit():
+                        return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+                except Exception:
+                    pass
+        return None
+
+    def _date_from_dicoms(search_dirs):
+        """Read StudyDate directly from DICOM headers when JSON sidecars lack it."""
         try:
-            import json as _json
-            raw_date = _json.loads(jsn.read_text()).get("StudyDate", "")
-            if isinstance(raw_date, str) and len(raw_date) == 8 and raw_date.isdigit():
-                scan_date = f"{raw_date[:4]}-{raw_date[4:6]}-{raw_date[6:]}"
-                break
-        except Exception:
-            pass
+            import pydicom
+        except ImportError:
+            return None
+        for d in search_dirs:
+            dcm_files = sorted(Path(d).rglob("*.dcm"))[:3]
+            for dcm_file in dcm_files:
+                try:
+                    ds = pydicom.dcmread(
+                        str(dcm_file),
+                        stop_before_pixels=True,
+                        specific_tags=["StudyDate", "SeriesDate", "ContentDate"],
+                    )
+                    for tag in ("StudyDate", "SeriesDate", "ContentDate"):
+                        raw = getattr(ds, tag, None)
+                        if raw and isinstance(raw, str) and len(raw) == 8 and raw.isdigit():
+                            return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+                except Exception:
+                    continue
+        return None
+
+    scan_date = _date_from_jsons(
+        [staging_dir] + [d for d in contrast_dirs_to_convert]
+    )
+    if scan_date is None:
+        scan_date = _date_from_dicoms(contrast_dirs_to_convert)
 
     # Run phantom processor
     print(f"\n  Running PhantomProcessor:")
@@ -584,7 +619,7 @@ def run_stage3(
         n_threads=n_threads,
         scan_date=scan_date,
     )
-    processor.process_session(str(t1_nii_path))
+    processor.process_session(str(t1_nii_path), output_dir=output_dir)
 
     # Clean up staging NIfTIs only — leave processed outputs in place
     print(f"\n  Removing temporary NIfTIs from staging folder: {staging_dir}")

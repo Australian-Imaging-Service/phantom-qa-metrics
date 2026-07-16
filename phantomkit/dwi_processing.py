@@ -394,11 +394,6 @@ def scan_directory(scans_dir: str) -> dict:
 
         candidate_dwi.append(str(d))
 
-    if not mprage_dirs:
-        raise ValueError(f"Could not identify any MPRAGE directory in {scans_dir}")
-    if not candidate_dwi:
-        raise ValueError(f"Could not identify any DWI directories in {scans_dir}")
-
     return {
         "mprage_dirs": mprage_dirs,
         "candidate_dwi": candidate_dwi,
