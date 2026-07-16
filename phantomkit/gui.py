@@ -6,12 +6,12 @@ import asyncio
 import json
 import sys
 import threading
-import webbrowser
+
 from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
-from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
@@ -20,7 +20,7 @@ from pydantic import BaseModel
 
 _HERE  = Path(__file__).parent
 _TMPL  = _HERE.parent / "template_data"
-_HOST  = "127.0.0.1"
+_HOST  = "0.0.0.0"
 _PORT  = 7878
 
 DWI_STEPS = [
@@ -87,14 +87,13 @@ async def list_htmls(output_dir: str = ""):
     return JSONResponse({"htmls": htmls})
 
 
-class OpenHtmlReq(BaseModel):
-    path: str
-
-@app.post("/api/open-html")
-async def open_html_file(r: OpenHtmlReq):
-    """Open an HTML file in the user's default browser."""
-    webbrowser.open(Path(r.path).as_uri())
-    return JSONResponse({"ok": True})
+@app.get("/api/serve-html")
+async def serve_html(path: str = ""):
+    """Serve an HTML file directly so the browser can open it in a new tab."""
+    p = Path(path)
+    if not p.is_file() or p.suffix != ".html":
+        return JSONResponse({"error": "file not found"}, status_code=404)
+    return FileResponse(str(p), media_type="text/html")
 
 
 # ── Streaming runner ─────────────────────────────────────────────────────────
@@ -822,11 +821,7 @@ async function showHtmlButtons(logId, paths) {
     btn.className = 'btn-open-html';
     btn.textContent = '↗ ' + path.split('/').pop().replace('.html', '');
     btn.onclick = function() {
-      fetch('/api/open-html', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ path: path }),
-      });
+      window.open('/api/serve-html?path=' + encodeURIComponent(path), '_blank');
     };
     container.appendChild(btn);
   });
@@ -989,15 +984,18 @@ function runLongitudinal() {
 # ---------------------------------------------------------------------------
 
 def main():
-    url = f"http://{_HOST}:{_PORT}"
+    local_url = f"http://127.0.0.1:{_PORT}"
 
     def _open():
-        import time
+        import time, webbrowser
         time.sleep(0.8)
-        webbrowser.open(url)
+        try:
+            webbrowser.open(local_url)
+        except Exception:
+            pass
 
     threading.Thread(target=_open, daemon=True).start()
-    print(f"PhantomKit GUI → {url}  (Ctrl-C to quit)")
+    print(f"PhantomKit GUI → {local_url}  (Ctrl-C to quit)")
     uvicorn.run(app, host=_HOST, port=_PORT, log_level="warning")
 
 
