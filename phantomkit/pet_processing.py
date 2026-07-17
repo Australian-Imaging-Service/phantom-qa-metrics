@@ -3,13 +3,31 @@ pet_processing.py
 =================
 PET phantom image preprocessing and ANTs rigid registration to a template.
 
-Pipeline (mirrors AntsReg_PET.sh):
+Pipeline (mirrors AntsReg_PET.sh, plus an orientation-correction step ahead
+of it — see ``phantomkit.pet_orientation``):
+  0. Correct gross (90-degree-multiple) orientation errors by matching the
+     phantom's own vial landmarks to the template
+     (``phantomkit.pet_orientation.reorient_pet_image``).
   1. Match voxel strides to the template (``mrtransform``).
   2. Normalise intensity to [0, 1] by dividing by the image max (``mrcalc``).
   3. Create a binary foreground mask by thresholding the normalised image.
   4. Run ``antsRegistration`` rigid with MI metric and fixed/moving masks.
   5. Apply the inverse affine transform to bring template vial labels into
      subject space (``antsApplyTransforms``).
+
+Why Step 0 is needed
+---------------------
+Multi-site PET acquisitions frequently carry NIfTI headers that do not
+reflect the true scan orientation (the sform/qform is often left at a
+generic value regardless of how the phantom was actually positioned in the
+scanner). Strides-matching (Step 1) only reorders how the array is *stored*
+to mirror the template's layout — it cannot fix an image whose content is
+genuinely rotated relative to the template. Left uncorrected, such images
+are typically well outside the capture range of the rigid registration in
+Step 4 and registration silently converges to the wrong pose. Step 0
+resolves this by locating the phantom's own hot/cold vial landmarks and
+determining which of the 24 physically-realisable 90-degree-multiple
+rotations best aligns them with the template, independent of the header.
 """
 
 from __future__ import annotations
@@ -42,13 +60,18 @@ def register_pet_to_template(
     results_dir: str,
     template_image: Optional[str] = None,
     template_mask: Optional[str] = None,
+    vial_template_dir: Optional[str] = None,
     mask_threshold: float = 0.15,
+    reorient: bool = True,
     force: bool = True,
 ) -> dict:
     """Register a PET image to the NEMA phantom template using ANTs rigid.
 
     Steps
     -----
+    0. ``phantomkit.pet_orientation.reorient_pet_image`` — correct gross
+       (90-degree-multiple) orientation errors by matching the phantom's own
+       vial landmarks to the template. Skipped if ``reorient=False``.
     1. ``mrtransform`` — match voxel strides to the template.
     2. ``mrstats`` + ``mrcalc`` — normalise to [0, 1] by dividing by max.
     3. ``mrcalc`` — threshold normalised image to create a foreground mask.
@@ -66,15 +89,27 @@ def register_pet_to_template(
     template_mask:
         Path to the fixed template foreground mask.  Defaults to
         ``template_data/PET/ImageTemplate_mask.nii.gz``.
+    vial_template_dir:
+        Directory of per-vial template masks used for orientation matching
+        (Step 0 only).  Defaults to ``template_data/PET/VialsLabelled/``.
     mask_threshold:
         Fraction of max intensity used to binarise the normalised moving image
         (default 0.15, matching the original shell script).
+    reorient:
+        Run Step 0 (orientation correction) before strides-matching.  Disable
+        only if the input is already known to share the template's gross
+        orientation.
     force:
         Pass ``-force`` flag to MRtrix commands to overwrite existing files.
 
     Returns
     -------
     dict
+        ``reoriented_image`` — orientation-corrected moving image path (``None``
+                                if ``reorient=False``)
+        ``orientation``      — dict of diagnostics from
+                                :func:`~phantomkit.pet_orientation.reorient_pet_image`
+                                (``None`` if ``reorient=False``)
         ``strides_image``    — strides-matched moving image path
         ``normalised_image`` — normalised moving image path
         ``mask_image``       — foreground mask of moving image path
@@ -86,13 +121,15 @@ def register_pet_to_template(
     results_path.mkdir(parents=True, exist_ok=True)
 
     # Resolve default template paths from the bundled template_data directory.
-    if template_image is None or template_mask is None:
+    if template_image is None or template_mask is None or vial_template_dir is None:
         _pkg    = Path(__file__).resolve().parent
         _td_pet = _pkg.parent / "template_data" / "PET"
         if template_image is None:
             template_image = str(_td_pet / "ImageTemplate.nii.gz")
         if template_mask is None:
             template_mask = str(_td_pet / "ImageTemplate_mask.nii.gz")
+        if vial_template_dir is None:
+            vial_template_dir = str(_td_pet / "VialsLabelled")
 
     # Derive output filenames from the input stem.
     stem        = input_path.name
@@ -101,6 +138,7 @@ def register_pet_to_template(
             stem = stem[: -len(_ext)]
             break
 
+    reoriented_img = results_path / f"{stem}_reoriented.nii.gz"
     strides_img    = results_path / f"{stem}_strides.nii.gz"
     normalised_img = results_path / f"{stem}_normalised.nii.gz"
     mask_img       = results_path / f"{stem}_mask.nii.gz"
@@ -108,9 +146,34 @@ def register_pet_to_template(
     prefix         = str(results_path / f"{stem}_")
     force_flag     = ["-force"] if force else []
 
+    # ── Step 0: correct gross orientation ───────────────────────────────────
+    orientation_info: Optional[dict] = None
+    strides_input = input_path
+    if reorient:
+        from phantomkit.pet_orientation import reorient_pet_image
+
+        print("  $ [orientation] matching vial landmarks against template …")
+        orientation_info = reorient_pet_image(
+            input_image=str(input_path),
+            output_image=str(reoriented_img),
+            template_image=str(template_image),
+            template_mask=str(template_mask),
+            vial_template_dir=str(vial_template_dir),
+            force=force,
+        )
+        if orientation_info["identity"]:
+            print("  $ [orientation] already matches template orientation.")
+        else:
+            print(
+                f"  $ [orientation] applied rotation {orientation_info['rotation']} "
+                f"(mean_error={orientation_info['mean_error_mm']:.1f}mm, "
+                f"n_matched={orientation_info['n_matched']})"
+            )
+        strides_input = reoriented_img
+
     # ── Step 1: match strides ────────────────────────────────────────────────
     _run(
-        ["mrtransform", str(input_path),
+        ["mrtransform", str(strides_input),
          "-strides", str(template_image),
          str(strides_img)] + force_flag
     )
@@ -156,6 +219,8 @@ def register_pet_to_template(
     _run(ants_cmd, env=env)
 
     return {
+        "reoriented_image": str(reoriented_img) if reorient else None,
+        "orientation":      orientation_info,
         "strides_image":    str(strides_img),
         "normalised_image": str(normalised_img),
         "mask_image":       str(mask_img),
@@ -239,6 +304,7 @@ def run_pet_pipeline(
     template_image: Optional[str] = None,
     template_mask: Optional[str] = None,
     mask_threshold: float = 0.15,
+    reorient: bool = True,
     force: bool = True,
 ) -> dict:
     """Run the full PET preprocessing, registration, and vial transform pipeline.
@@ -251,10 +317,11 @@ def run_pet_pipeline(
         Root output directory.
     vial_template_dir:
         Directory containing per-vial template masks.  Defaults to
-        ``template_data/PET/VialsLabelled/``.
+        ``template_data/PET/VialsLabelled/``.  Also used for orientation
+        matching (Step 0) unless ``reorient=False``.
     template_image, template_mask:
         See :func:`register_pet_to_template`.
-    mask_threshold, force:
+    mask_threshold, reorient, force:
         See :func:`register_pet_to_template`.
 
     Returns
@@ -272,7 +339,9 @@ def run_pet_pipeline(
         results_dir=results_dir,
         template_image=template_image,
         template_mask=template_mask,
+        vial_template_dir=vial_template_dir,
         mask_threshold=mask_threshold,
+        reorient=reorient,
         force=force,
     )
 
