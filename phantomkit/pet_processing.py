@@ -3,10 +3,10 @@ pet_processing.py
 =================
 PET phantom image preprocessing and ANTs rigid registration to a template.
 
-Pipeline (mirrors AntsReg_PET.sh):
+Pipeline:
   1. Match voxel strides to the template (``mrtransform``).
-  2. Normalise intensity to [0, 1] by dividing by the image max (``mrcalc``).
-  3. Create a binary foreground mask by thresholding the normalised image.
+  2. Create a binary foreground mask via Otsu thresholding (``mrthreshold``).
+  3. Coarse rigid grid search for initial alignment (``antsAI``).
   4. Run ``antsRegistration`` rigid with MI metric and fixed/moving masks.
   5. Apply the inverse affine transform to bring template vial labels into
      subject space (``antsApplyTransforms``).
@@ -32,6 +32,46 @@ def _run(cmd: list, env: Optional[dict] = None) -> None:
     subprocess.run(str_cmd, check=True, env=env)
 
 
+def _slice_max_of_means(pet_image: str, mask_path: str) -> float:
+    """Return the maximum of per-axial-slice means within a binary mask.
+
+    For each axial (z) slice where the mask has at least one voxel, the mean
+    of the PET voxels in that slice is computed.  The function returns the
+    largest of those per-slice means — used as the numerator of the
+    slice-averaged CRC.
+    """
+    import gzip
+    import struct
+
+    import numpy as np
+
+    def _load_vol(p: str) -> np.ndarray:
+        raw = Path(p).read_bytes()
+        try:
+            buf = gzip.decompress(raw)
+        except OSError:
+            buf = raw
+        dims = struct.unpack_from("<8h", buf, 40)
+        nx, ny, nz = dims[1], dims[2], dims[3]
+        dc = struct.unpack_from("<h", buf, 70)[0]
+        (vo,) = struct.unpack_from("<f", buf, 108)
+        vs = max(int(vo), 352)
+        _dt_map = {2: "<u1", 4: "<i2", 8: "<i4", 16: "<f4", 64: "<f8", 512: "<u2", 768: "<u4"}
+        dt = np.dtype(_dt_map.get(dc, "<f4"))
+        return np.frombuffer(buf[vs:], dtype=dt)[: nx * ny * nz].reshape(
+            (nx, ny, nz), order="F"
+        )
+
+    pet  = _load_vol(pet_image).astype(float)
+    mask = _load_vol(mask_path) > 0.5
+    slice_means = [
+        float(pet[:, :, z][mask[:, :, z]].mean())
+        for z in range(pet.shape[2])
+        if mask[:, :, z].any()
+    ]
+    return float(max(slice_means)) if slice_means else float("nan")
+
+
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
@@ -42,7 +82,6 @@ def register_pet_to_template(
     results_dir: str,
     template_image: Optional[str] = None,
     template_mask: Optional[str] = None,
-    mask_threshold: float = 0.15,
     force: bool = True,
 ) -> dict:
     """Register a PET image to the NEMA phantom template using ANTs rigid.
@@ -50,8 +89,8 @@ def register_pet_to_template(
     Steps
     -----
     1. ``mrtransform`` — match voxel strides to the template.
-    2. ``mrstats`` + ``mrcalc`` — normalise to [0, 1] by dividing by max.
-    3. ``mrcalc`` — threshold normalised image to create a foreground mask.
+    2. ``mrthreshold`` — Otsu threshold to create a foreground mask.
+    3. ``antsAI`` — coarse rigid grid search for initial alignment.
     4. ``antsRegistration`` — rigid MI registration with fixed and moving masks.
 
     Parameters
@@ -66,9 +105,6 @@ def register_pet_to_template(
     template_mask:
         Path to the fixed template foreground mask.  Defaults to
         ``template_data/PET/ImageTemplate_mask.nii.gz``.
-    mask_threshold:
-        Fraction of max intensity used to binarise the normalised moving image
-        (default 0.15, matching the original shell script).
     force:
         Pass ``-force`` flag to MRtrix commands to overwrite existing files.
 
@@ -76,8 +112,7 @@ def register_pet_to_template(
     -------
     dict
         ``strides_image``    — strides-matched moving image path
-        ``normalised_image`` — normalised moving image path
-        ``mask_image``       — foreground mask of moving image path
+        ``mask_image``       — Otsu foreground mask of moving image path
         ``warped_image``     — ANTs-warped moving image in template space path
         ``transform_prefix`` — ANTs output prefix (``<prefix>0GenericAffine.mat``)
     """
@@ -101,12 +136,16 @@ def register_pet_to_template(
             stem = stem[: -len(_ext)]
             break
 
-    strides_img    = results_path / f"{stem}_strides.nii.gz"
-    normalised_img = results_path / f"{stem}_normalised.nii.gz"
-    mask_img       = results_path / f"{stem}_mask.nii.gz"
-    warped_img     = results_path / f"{stem}_warped.nii.gz"
-    prefix         = str(results_path / f"{stem}_")
-    force_flag     = ["-force"] if force else []
+    strides_img = results_path / f"{stem}_strides.nii.gz"
+    mask_img    = results_path / f"{stem}_mask.nii.gz"
+    init_mat    = str(results_path / f"{stem}_init.mat")
+    warped_img  = results_path / f"{stem}_warped.nii.gz"
+    prefix      = str(results_path / f"{stem}_")
+    force_flag  = ["-force"] if force else []
+
+    import multiprocessing
+    env = os.environ.copy()
+    env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(multiprocessing.cpu_count())
 
     # ── Step 1: match strides ────────────────────────────────────────────────
     _run(
@@ -115,35 +154,29 @@ def register_pet_to_template(
          str(strides_img)] + force_flag
     )
 
-    # ── Step 2: normalise by max ─────────────────────────────────────────────
-    max_val = float(
-        subprocess.check_output(
-            ["mrstats", str(strides_img), "-output", "max"], text=True
-        ).strip()
-    )
+    # ── Step 2: Otsu threshold → foreground mask ─────────────────────────────
     _run(
-        ["mrcalc", str(strides_img), str(max_val), "-div",
-         str(normalised_img)] + force_flag
+        ["mrthreshold", str(strides_img), str(mask_img)] + force_flag
     )
 
-    # ── Step 3: create foreground mask ───────────────────────────────────────
-    _run(
-        ["mrcalc", str(normalised_img), str(mask_threshold), "-gt",
-         str(mask_img)] + force_flag
-    )
+    # ── Step 3: coarse rigid search with antsAI ──────────────────────────────
+    _run([
+        "antsAI",
+        "-d", "3",
+        "-m", f"MI[{template_image},{strides_img},32,Regular,0.2]",
+        "-t", "Rigid[0.1]",
+        "-s", "[20,0.12]",
+        "-p", "0",
+        "-x", f"[{template_mask},{mask_img}]",
+        "-o", init_mat,
+    ], env=env)
 
     # ── Step 4: ANTs rigid registration ─────────────────────────────────────
-    # The MI metric operates on the strides-matched (but not normalised) image;
-    # the normalised image is used only for the initial centre-of-mass alignment.
-    import multiprocessing
-    env = os.environ.copy()
-    env["ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS"] = str(multiprocessing.cpu_count())
-
     ants_cmd = [
         "antsRegistration",
         "-d", "3",
         "-o",  f"[{prefix},{warped_img}]",
-        "-r",  f"[{template_image},{normalised_img},1]",
+        "-r",  init_mat,
         "-m",  f"MI[{template_image},{strides_img},1,32,Regular,0.25]",
         "-t",  "Rigid[0.1]",
         "-c",  "[1000x500x250x100,1e-6,10]",
@@ -157,7 +190,6 @@ def register_pet_to_template(
 
     return {
         "strides_image":    str(strides_img),
-        "normalised_image": str(normalised_img),
         "mask_image":       str(mask_img),
         "warped_image":     str(warped_img),
         "transform_prefix": prefix,
@@ -238,7 +270,6 @@ def run_pet_pipeline(
     vial_template_dir: Optional[str] = None,
     template_image: Optional[str] = None,
     template_mask: Optional[str] = None,
-    mask_threshold: float = 0.15,
     force: bool = True,
 ) -> dict:
     """Run the full PET preprocessing, registration, and vial transform pipeline.
@@ -254,7 +285,7 @@ def run_pet_pipeline(
         ``template_data/PET/VialsLabelled/``.
     template_image, template_mask:
         See :func:`register_pet_to_template`.
-    mask_threshold, force:
+    force:
         See :func:`register_pet_to_template`.
 
     Returns
@@ -272,7 +303,6 @@ def run_pet_pipeline(
         results_dir=results_dir,
         template_image=template_image,
         template_mask=template_mask,
-        mask_threshold=mask_threshold,
         force=force,
     )
 
@@ -311,7 +341,8 @@ def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
     -------
     dict
         ``{vial_name: {mean, std, median, max, min, count, p25, p75,
-                        mean_mad, median_mad}}``
+                        mean_mad, median_mad, uniformity, crc_3d,
+                        crc_slice_avg}}``
     """
     import numpy as np
 
@@ -358,17 +389,27 @@ def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
         except Exception as exc:
             print(f"  WARNING: mrdump failed for vial {vial_name}: {exc}")
 
+        std_val = float(vals[2])
+        max_val = float(vals[4])
+        uniformity    = std_val / mean_val * 100 if mean_val != 0 else nan
+        crc_3d        = max_val / mean_val if mean_val != 0 else nan
+        sam           = _slice_max_of_means(str(pet_image), str(mask_path))
+        crc_slice_avg = sam / mean_val if mean_val != 0 else nan
+
         metrics[vial_name] = {
-            "mean":       mean_val,
-            "median":     median_val,
-            "std":        float(vals[2]),
-            "min":        float(vals[3]),
-            "max":        float(vals[4]),
-            "count":      float(vals[5]),
-            "p25":        p25,
-            "p75":        p75,
-            "mean_mad":   mean_mad,
-            "median_mad": median_mad,
+            "mean":         mean_val,
+            "median":       median_val,
+            "std":          std_val,
+            "min":          float(vals[3]),
+            "max":          max_val,
+            "count":        float(vals[5]),
+            "p25":          p25,
+            "p75":          p75,
+            "mean_mad":     mean_mad,
+            "median_mad":   median_mad,
+            "uniformity":   uniformity,
+            "crc_3d":       crc_3d,
+            "crc_slice_avg": crc_slice_avg,
         }
 
     return metrics
@@ -393,6 +434,7 @@ def save_pet_metrics_xlsx(metrics: dict, output_path: str) -> None:
     sheet_order = [
         "mean", "median", "std", "min", "max",
         "count", "p25", "p75", "mean_mad", "median_mad",
+        "uniformity", "crc_3d", "crc_slice_avg",
     ]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

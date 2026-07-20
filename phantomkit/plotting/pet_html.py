@@ -16,6 +16,7 @@ There is no reference dataset — this is a "measured only" report.
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
 from typing import Optional
 
@@ -130,6 +131,11 @@ def build_pet_html(
     vial_niftis: Optional[dict] = None,
     embedded_data: Optional[dict] = None,
     viewer_cal_max: Optional[float] = None,
+    crc_vials: Optional[list] = None,
+    crc_3d_values: Optional[list] = None,
+    crc_slice_avg_values: Optional[list] = None,
+    uniformity_vial: Optional[str] = None,
+    uniformity_pct: Optional[float] = None,
 ) -> str:
     """Build a self-contained interactive HTML page for PET vial measurements.
 
@@ -154,6 +160,18 @@ def build_pet_html(
         ``{vial_name: path}`` mapping for vial ROI overlay NIfTIs.
     embedded_data:
         Optional extra dict to embed as machine-readable JSON in the HTML.
+    crc_vials:
+        Ordered list of vial labels to show in the CRC table (e.g. A–E).
+    crc_3d_values:
+        CRC values computed from the full 3D ROI (max/mean), same order as
+        ``crc_vials``.
+    crc_slice_avg_values:
+        CRC values computed from the max of per-axial-slice means divided by
+        the 3D mean, same order as ``crc_vials``.
+    uniformity_vial:
+        Label of the uniformity vial (e.g. ``"H"``).
+    uniformity_pct:
+        Uniformity value in percent (SD/mean × 100) for ``uniformity_vial``.
 
     Returns
     -------
@@ -243,6 +261,42 @@ def build_pet_html(
     vials_json    = json.dumps(list(vials))
     y_label_json  = json.dumps(y_label)
 
+    # ---- CRC section (A–E) --------------------------------------------------
+    def _fmt(v):
+        return f"{v:.3f}" if v is not None and not math.isnan(v) else "&mdash;"
+
+    if crc_vials and crc_3d_values is not None:
+        _sa = crc_slice_avg_values or [None] * len(crc_vials)
+        rows = "".join(
+            f"<tr><td>{v}</td><td>{_fmt(c3d)}</td><td>{_fmt(csa)}</td></tr>"
+            for v, c3d, csa in zip(crc_vials, crc_3d_values, _sa)
+        )
+        crc_section = f"""<div class="stats-section">
+  <div class="stats-title">Contrast Recovery Coefficient (CRC)</div>
+  <table class="stats-table">
+    <thead><tr><th>Vial</th><th>CRC<sub>max</sub> (3D)</th><th>CRC<sub>max</sub> (slice-avg)</th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
+    else:
+        crc_section = ""
+
+    # ---- Uniformity section (H) ---------------------------------------------
+    if (
+        uniformity_vial
+        and uniformity_pct is not None
+        and not math.isnan(uniformity_pct)
+    ):
+        uniformity_section = f"""<div class="stats-section">
+  <div class="stats-title">Uniformity &mdash; Vial {uniformity_vial}</div>
+  <table class="stats-table">
+    <thead><tr><th>Vial</th><th>Uniformity (SD / Mean &times; 100)</th></tr></thead>
+    <tbody><tr><td>{uniformity_vial}</td><td>{uniformity_pct:.2f}%</td></tr></tbody>
+  </table>
+</div>"""
+    else:
+        uniformity_section = ""
+
     data_tag = phantomkit_data_tag(embedded_data or {
         "type": "pet_vial_activity",
         "phantom": phantom,
@@ -272,6 +326,10 @@ def build_pet_html(
     <tbody id="statsBody"></tbody>
   </table>
 </div>
+
+{crc_section}
+
+{uniformity_section}
 
 {data_tag}
 
@@ -395,6 +453,21 @@ def plot_pet_vials(
     max_arr = _sheet("max")
     cal_max = float(max_arr.max()) if max_arr is not None and max_arr.size else None
 
+    # ── CRC (vials A–E) ──────────────────────────────────────────────────────
+    crc_3d_arr      = _sheet("crc_3d")
+    crc_sa_arr      = _sheet("crc_slice_avg")
+    _crc_names      = {"A", "B", "C", "D", "E"}
+    _crc_idx        = [i for i, v in enumerate(vials) if v in _crc_names]
+    crc_vials_out   = [vials[i] for i in _crc_idx] if _crc_idx else None
+    crc_3d_out      = [float(crc_3d_arr[i]) for i in _crc_idx] if crc_3d_arr is not None and _crc_idx else None
+    crc_sa_out      = [float(crc_sa_arr[i]) for i in _crc_idx] if crc_sa_arr is not None and _crc_idx else None
+
+    # ── Uniformity (vial H) ──────────────────────────────────────────────────
+    uni_arr   = _sheet("uniformity")
+    _h_idx    = next((i for i, v in enumerate(vials) if v == "H"), None)
+    uni_pct   = float(uni_arr[_h_idx]) if uni_arr is not None and _h_idx is not None else None
+    uni_vial  = "H" if _h_idx is not None else None
+
     html = build_pet_html(
         vials=vials,
         mean_values=mean_arr,
@@ -418,6 +491,11 @@ def plot_pet_vials(
             "vials": vials,
         },
         viewer_cal_max=cal_max,
+        crc_vials=crc_vials_out,
+        crc_3d_values=crc_3d_out,
+        crc_slice_avg_values=crc_sa_out,
+        uniformity_vial=uni_vial,
+        uniformity_pct=uni_pct,
     )
 
     output_path = Path(output).with_suffix(".html")
