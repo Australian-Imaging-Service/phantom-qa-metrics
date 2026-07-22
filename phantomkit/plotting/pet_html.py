@@ -141,11 +141,30 @@ def build_pet_html(
     else:
         sor_section = ""
 
-    data_tag = phantomkit_data_tag(embedded_data or {
+    _embed = dict(embedded_data or {})
+    _embed.update({
         "type": "pet_vial_activity",
         "phantom": phantom,
         "vials": list(vials),
+        "crc": {
+            "vials": sphere_vials,
+            "crc_3d": crc_3d_data,
+            "crc_axial": crc_axial_data,
+        },
+        "sor": {
+            "vials": sor_vials or [],
+            "values": list(sor_values or []),
+        },
+        "uniformity": {
+            "vial": uniformity_vial or "",
+            "pct": (
+                float(uniformity_pct)
+                if uniformity_pct is not None and not math.isnan(float(uniformity_pct))
+                else None
+            ),
+        },
     })
+    data_tag = phantomkit_data_tag(_embed)
     opts_js = base_opts_js(x_label="Vial", y_label="CRCmax", enable_zoom=True)
     head    = html_head(title, include_niivue=_has_viewer)
 
