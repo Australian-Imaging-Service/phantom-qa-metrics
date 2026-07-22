@@ -478,7 +478,7 @@ def _niivue_viewer_panel(
 
     vials_data = [
         {"name": name, "b64": nifti_to_base64(vpath)}
-        for name, vpath in sorted(vial_niftis.items())
+        for name, vpath in vial_niftis.items()
         if vpath and Path(vpath).exists()
     ]
 

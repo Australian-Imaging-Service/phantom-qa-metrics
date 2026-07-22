@@ -32,44 +32,54 @@ def _run(cmd: list, env: Optional[dict] = None) -> None:
     subprocess.run(str_cmd, check=True, env=env)
 
 
-def _slice_max_of_means(pet_image: str, mask_path: str) -> float:
-    """Return the maximum of per-axial-slice means within a binary mask.
+_SPHERE_VIALS = {"1mm", "2mm", "3mm", "4mm", "5mm"}
+_UNIFORM_VIAL = "Uniform"
+_SOR_VIALS    = {"Air", "Water"}
+_VIAL_ORDER   = ["1mm", "2mm", "3mm", "4mm", "5mm", "Air", "Water", "Uniform"]
 
-    For each axial (z) slice where the mask has at least one voxel, the mean
-    of the PET voxels in that slice is computed.  The function returns the
-    largest of those per-slice means — used as the numerator of the
-    slice-averaged CRC.
-    """
+
+def _load_nifti(path: str):
+    """Return voxel data as a float64 numpy array shaped (nx, ny, nz)."""
     import gzip
     import struct
 
     import numpy as np
 
-    def _load_vol(p: str) -> np.ndarray:
-        raw = Path(p).read_bytes()
-        try:
-            buf = gzip.decompress(raw)
-        except OSError:
-            buf = raw
-        dims = struct.unpack_from("<8h", buf, 40)
-        nx, ny, nz = dims[1], dims[2], dims[3]
-        dc = struct.unpack_from("<h", buf, 70)[0]
-        (vo,) = struct.unpack_from("<f", buf, 108)
-        vs = max(int(vo), 352)
-        _dt_map = {2: "<u1", 4: "<i2", 8: "<i4", 16: "<f4", 64: "<f8", 512: "<u2", 768: "<u4"}
-        dt = np.dtype(_dt_map.get(dc, "<f4"))
-        return np.frombuffer(buf[vs:], dtype=dt)[: nx * ny * nz].reshape(
-            (nx, ny, nz), order="F"
-        )
+    raw = Path(path).read_bytes()
+    try:
+        buf = gzip.decompress(raw)
+    except OSError:
+        buf = raw
+    dims = struct.unpack_from("<8h", buf, 40)
+    nx, ny, nz = dims[1], dims[2], dims[3]
+    dc = struct.unpack_from("<h", buf, 70)[0]
+    (vo,) = struct.unpack_from("<f", buf, 108)
+    vs = max(int(vo), 352)
+    _dt_map = {2: "<u1", 4: "<i2", 8: "<i4", 16: "<f4", 64: "<f8", 512: "<u2", 768: "<u4"}
+    dt = np.dtype(_dt_map.get(dc, "<f4"))
+    return np.frombuffer(buf[vs:], dtype=dt)[: nx * ny * nz].reshape(
+        (nx, ny, nz), order="F"
+    ).astype(float)
 
-    pet  = _load_vol(pet_image).astype(float)
-    mask = _load_vol(mask_path) > 0.5
-    slice_means = [
-        float(pet[:, :, z][mask[:, :, z]].mean())
-        for z in range(pet.shape[2])
-        if mask[:, :, z].any()
-    ]
-    return float(max(slice_means)) if slice_means else float("nan")
+
+def _col_mean_max(pet_image: str, mask_path: str) -> float:
+    """Return the max of per-(x,y)-column means within a binary mask.
+
+    For each (x, y) position where the mask contains at least one voxel,
+    all PET values at those (x, y, z) positions are averaged over z.  This
+    produces a 2D projection (effectively flattening the axial stack).  The
+    function returns the maximum of that 2D projection — used as the
+    numerator of the axial-average CRC.
+    """
+    import numpy as np
+
+    pet  = _load_nifti(pet_image)
+    mask = _load_nifti(mask_path) > 0.5
+
+    # Replace out-of-mask voxels with NaN, then mean over z ignoring NaNs
+    col_means = np.nanmean(np.where(mask, pet, np.nan), axis=2)  # shape (nx, ny)
+    valid_xy  = mask.any(axis=2)
+    return float(np.nanmax(col_means[valid_xy])) if valid_xy.any() else float("nan")
 
 
 # ---------------------------------------------------------------------------
@@ -326,9 +336,15 @@ def run_pet_pipeline(
 def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
     """Extract per-vial statistics from a PET image using mrstats / mrdump.
 
-    Matches the extraction approach used by PhantomProcessor for all other
-    modalities: ``mrstats`` provides mean/median/std/min/max/count and
-    ``mrdump`` provides p25/p75/mean_mad/median_mad.
+    Two-pass computation
+    --------------------
+    Pass 1 — ``mrstats`` + ``mrdump`` collect basic stats for every vial.
+    Pass 2 — derived metrics that reference the Uniform ROI mean:
+
+    * **Uniformity** (Uniform ROI only): SD / mean × 100.
+    * **CRC** (sphere ROIs 1mm–5mm): max / mean(Uniform).
+      Two variants: 3D max, and max of the axial-average projection.
+    * **SOR** (Air and Water ROIs): mean(ROI) / mean(Uniform).
 
     Parameters
     ----------
@@ -342,15 +358,15 @@ def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
     dict
         ``{vial_name: {mean, std, median, max, min, count, p25, p75,
                         mean_mad, median_mad, uniformity, crc_3d,
-                        crc_slice_avg}}``
+                        crc_slice_avg, sor}}``
     """
     import numpy as np
 
     nan = float("nan")
     metrics: dict = {}
 
+    # ── Pass 1: basic stats for every vial ───────────────────────────────────
     for vial_name, mask_path in sorted(vial_masks.items()):
-        # ── mrstats: mean / median / std / min / max / count ─────────────────
         result = subprocess.run(
             [
                 "mrstats", "-quiet", str(pet_image),
@@ -370,10 +386,7 @@ def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
             continue
 
         vals = result.stdout.strip().split()
-        mean_val   = float(vals[0])
-        median_val = float(vals[1])
 
-        # ── mrdump: p25 / p75 / mean_mad / median_mad ────────────────────────
         p25 = p75 = mean_mad = median_mad = nan
         try:
             dump = subprocess.run(
@@ -389,28 +402,45 @@ def extract_pet_vial_metrics(pet_image: str, vial_masks: dict) -> dict:
         except Exception as exc:
             print(f"  WARNING: mrdump failed for vial {vial_name}: {exc}")
 
-        std_val = float(vals[2])
-        max_val = float(vals[4])
-        uniformity    = std_val / mean_val * 100 if mean_val != 0 else nan
-        crc_3d        = max_val / mean_val if mean_val != 0 else nan
-        sam           = _slice_max_of_means(str(pet_image), str(mask_path))
-        crc_slice_avg = sam / mean_val if mean_val != 0 else nan
-
         metrics[vial_name] = {
-            "mean":         mean_val,
-            "median":       median_val,
-            "std":          std_val,
-            "min":          float(vals[3]),
-            "max":          max_val,
-            "count":        float(vals[5]),
-            "p25":          p25,
-            "p75":          p75,
-            "mean_mad":     mean_mad,
-            "median_mad":   median_mad,
-            "uniformity":   uniformity,
-            "crc_3d":       crc_3d,
-            "crc_slice_avg": crc_slice_avg,
+            "mean":          float(vals[0]),
+            "median":        float(vals[1]),
+            "std":           float(vals[2]),
+            "min":           float(vals[3]),
+            "max":           float(vals[4]),
+            "count":         float(vals[5]),
+            "p25":           p25,
+            "p75":           p75,
+            "mean_mad":      mean_mad,
+            "median_mad":    median_mad,
+            "uniformity":    nan,
+            "crc_3d":        nan,
+            "crc_slice_avg": nan,
+            "sor":           nan,
         }
+
+    # ── Pass 2: derived metrics using the Uniform ROI mean ───────────────────
+    uniform_mean = metrics.get(_UNIFORM_VIAL, {}).get("mean", nan)
+    if uniform_mean != 0 and uniform_mean == uniform_mean:  # non-zero, non-NaN
+        # Uniformity
+        if _UNIFORM_VIAL in metrics:
+            m = metrics[_UNIFORM_VIAL]
+            m["uniformity"] = m["std"] / m["mean"] * 100 if m["mean"] != 0 else nan
+
+        # CRC for each sphere vial
+        for vial_name in _SPHERE_VIALS:
+            if vial_name not in metrics:
+                continue
+            m = metrics[vial_name]
+            m["crc_3d"] = m["max"] / uniform_mean
+            sam = _col_mean_max(str(pet_image), str(vial_masks[vial_name]))
+            m["crc_slice_avg"] = sam / uniform_mean
+
+        # SOR for Air and Water
+        for vial_name in _SOR_VIALS:
+            if vial_name not in metrics:
+                continue
+            metrics[vial_name]["sor"] = metrics[vial_name]["mean"] / uniform_mean
 
     return metrics
 
@@ -430,11 +460,14 @@ def save_pet_metrics_xlsx(metrics: dict, output_path: str) -> None:
     """
     import pandas as pd
 
-    vials = sorted(metrics.keys())
+    vials = sorted(
+        metrics.keys(),
+        key=lambda v: _VIAL_ORDER.index(v) if v in _VIAL_ORDER else len(_VIAL_ORDER),
+    )
     sheet_order = [
         "mean", "median", "std", "min", "max",
         "count", "p25", "p75", "mean_mad", "median_mad",
-        "uniformity", "crc_3d", "crc_slice_avg",
+        "uniformity", "crc_3d", "crc_slice_avg", "sor",
     ]
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

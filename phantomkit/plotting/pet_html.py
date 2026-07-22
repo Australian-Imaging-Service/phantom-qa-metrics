@@ -35,6 +35,8 @@ _PET_CONTROLS_HTML = """\
     <button class="pk-btn pk-measure-btn active" onclick="pkSetMeasure('mean',this)">Mean</button>
     <button class="pk-btn pk-measure-btn" onclick="pkSetMeasure('median',this)">Median</button>
     <button class="pk-btn pk-measure-btn" onclick="pkSetMeasure('max',this)">Max</button>
+    <button class="pk-btn pk-measure-btn" onclick="pkSetMeasure('crc_3d',this)">CRC<sub>max</sub> 3D</button>
+    <button class="pk-btn pk-measure-btn" onclick="pkSetMeasure('crc_axial',this)">CRC<sub>max</sub> axial</button>
   </div>
   <div class="pk-ctrl-group">
     <span class="pk-ctrl-label">Error bars</span>
@@ -74,15 +76,19 @@ function pkSetErrMode(mode, btn) {
   pkUpdateAllCharts();
 }
 
+const _CRC_MODES = new Set(["crc_3d", "crc_axial"]);
+const _CRC_Y_LABELS = {crc_3d: "CRCmax (3D)", crc_axial: "CRCmax (axial avg)"};
+
 function pkUpdateAllCharts() {
   const m = window._pkMeasure, e = window._pkErrMode;
+  const isCRC = _CRC_MODES.has(m);
   _pkCharts.forEach(ch => {
     ch.data.datasets.forEach((ds) => {
       if (ds._row !== undefined) {
         const vals = PK_DATA.measure[m][ds._row];
         ds.data.forEach((pt, k) => { pt.y = vals[k]; });
-        // max has no errBounds — error bars suppressed automatically
         const eb = (
+          !isCRC &&
           e !== "none" &&
           PK_DATA.errBounds[m] &&
           PK_DATA.errBounds[m][e]
@@ -99,6 +105,7 @@ function pkUpdateAllCharts() {
         }
       }
     });
+    ch.options.scales.y.title.text = _CRC_Y_LABELS[m] ?? Y_LABEL;
     ch.update("none");
   });
   if (typeof window._pkAfterUpdate === "function") window._pkAfterUpdate();
@@ -136,6 +143,10 @@ def build_pet_html(
     crc_slice_avg_values: Optional[list] = None,
     uniformity_vial: Optional[str] = None,
     uniformity_pct: Optional[float] = None,
+    sor_vials: Optional[list] = None,
+    sor_values: Optional[list] = None,
+    crc_3d_chart: Optional[list] = None,
+    crc_slice_avg_chart: Optional[list] = None,
 ) -> str:
     """Build a self-contained interactive HTML page for PET vial measurements.
 
@@ -169,9 +180,13 @@ def build_pet_html(
         CRC values computed from the max of per-axial-slice means divided by
         the 3D mean, same order as ``crc_vials``.
     uniformity_vial:
-        Label of the uniformity vial (e.g. ``"H"``).
+        Label of the uniformity vial (e.g. ``"Uniform"``).
     uniformity_pct:
         Uniformity value in percent (SD/mean × 100) for ``uniformity_vial``.
+    sor_vials:
+        Ordered list of vial labels for the SOR table (e.g. ``["Air", "Water"]``).
+    sor_values:
+        SOR values (mean(ROI)/mean(Uniform)) in the same order as ``sor_vials``.
 
     Returns
     -------
@@ -214,13 +229,19 @@ def build_pet_html(
         median_mad_m=medmad_2d.T if medmad_2d is not None else None,
     )
 
-    # "max" is included in PK_DATA.measure but intentionally omitted from
-    # errBounds — the toggle JS falls through to ds.errorBars = {} for max.
+    # "max" and CRC modes are included in PK_DATA.measure but omitted from
+    # errBounds — the toggle JS falls through to ds.errorBars = {} for those.
+    # CRC arrays are full-length; None entries render as missing chart points.
+    _n = len(vials)
+    _crc_3d_row  = crc_3d_chart        if crc_3d_chart        is not None else [None] * _n
+    _crc_axl_row = crc_slice_avg_chart if crc_slice_avg_chart is not None else [None] * _n
     pk_data_json = json.dumps({
         "measure": {
-            "mean":   mean_2d.T.tolist(),
-            "median": med_2d.T.tolist(),
-            "max":    max_2d.T.tolist(),
+            "mean":      mean_2d.T.tolist(),
+            "median":    med_2d.T.tolist(),
+            "max":       max_2d.T.tolist(),
+            "crc_3d":    [_crc_3d_row],
+            "crc_axial": [_crc_axl_row],
         },
         "errBounds": pk_err_bounds,
     })
@@ -281,21 +302,37 @@ def build_pet_html(
     else:
         crc_section = ""
 
-    # ---- Uniformity section (H) ---------------------------------------------
+    # ---- Uniformity section (Uniform ROI) -----------------------------------
     if (
         uniformity_vial
         and uniformity_pct is not None
         and not math.isnan(uniformity_pct)
     ):
         uniformity_section = f"""<div class="stats-section">
-  <div class="stats-title">Uniformity &mdash; Vial {uniformity_vial}</div>
+  <div class="stats-title">Uniformity &mdash; {uniformity_vial} ROI</div>
   <table class="stats-table">
-    <thead><tr><th>Vial</th><th>Uniformity (SD / Mean &times; 100)</th></tr></thead>
+    <thead><tr><th>ROI</th><th>Uniformity (SD / Mean &times; 100)</th></tr></thead>
     <tbody><tr><td>{uniformity_vial}</td><td>{uniformity_pct:.2f}%</td></tr></tbody>
   </table>
 </div>"""
     else:
         uniformity_section = ""
+
+    # ---- SOR section (Air / Water) ------------------------------------------
+    if sor_vials and sor_values is not None:
+        sor_rows = "".join(
+            f"<tr><td>{v}</td><td>{_fmt(s)}</td></tr>"
+            for v, s in zip(sor_vials, sor_values)
+        )
+        sor_section = f"""<div class="stats-section">
+  <div class="stats-title">Spill-Over Ratio (SOR)</div>
+  <table class="stats-table">
+    <thead><tr><th>ROI</th><th>SOR (mean ROI / mean Uniform)</th></tr></thead>
+    <tbody>{sor_rows}</tbody>
+  </table>
+</div>"""
+    else:
+        sor_section = ""
 
     data_tag = phantomkit_data_tag(embedded_data or {
         "type": "pet_vial_activity",
@@ -331,12 +368,15 @@ def build_pet_html(
 
 {uniformity_section}
 
+{sor_section}
+
 {data_tag}
 
 <script>
 const VIALS    = {vials_json};
 const DATASETS = {datasets_json};
 const PK_DATA  = {pk_data_json};
+const Y_LABEL  = {y_label_json};
 
 {ERROR_BAR_PLUGIN_JS}
 {_PET_TOGGLE_JS}
@@ -357,29 +397,44 @@ document.getElementById("intensityChart").addEventListener("dblclick", () => cha
 function pkUpdateStatsTable() {{
   const m = window._pkMeasure, e = window._pkErrMode;
   const vals = PK_DATA.measure[m][0];
-  const measureLabel = m === "mean" ? "Mean" : m === "median" ? "Median" : "Max";
-  const errLabel = (m === "max")
-    ? "&mdash;"
-    : e === "none"   ? "None"
-    : e === "sd"     ? "&plusmn;SD"
-    : e === "se"     ? "&plusmn;SE"
-    : e === "2se"    ? "&plusmn;2&thinsp;SE"
-    : e === "mad"    ? "&plusmn;MAD"
-    : e === "iqr"    ? "IQR [Q25&ndash;Q75]"
-    : "Min&ndash;Max";
-  document.getElementById("statsHead").innerHTML =
-    `<th>Vial</th><th>${{measureLabel}}</th><th>${{errLabel}}</th>`;
+  const isCRC = _CRC_MODES.has(m);
+  const measureLabel = {{
+    mean:"Mean", median:"Median", max:"Max",
+    crc_3d:"CRC<sub>max</sub> (3D)", crc_axial:"CRC<sub>max</sub> (axial avg)"
+  }}[m] ?? m;
+  if (isCRC) {{
+    document.getElementById("statsHead").innerHTML =
+      `<th>Vial</th><th>${{measureLabel}}</th>`;
+  }} else {{
+    const errLabel = (m === "max")
+      ? "&mdash;"
+      : e === "none"   ? "None"
+      : e === "sd"     ? "&plusmn;SD"
+      : e === "se"     ? "&plusmn;SE"
+      : e === "2se"    ? "&plusmn;2&thinsp;SE"
+      : e === "mad"    ? "&plusmn;MAD"
+      : e === "iqr"    ? "IQR [Q25&ndash;Q75]"
+      : "Min&ndash;Max";
+    document.getElementById("statsHead").innerHTML =
+      `<th>Vial</th><th>${{measureLabel}}</th><th>${{errLabel}}</th>`;
+  }}
   const tbody = document.getElementById("statsBody");
   tbody.innerHTML = "";
   VIALS.forEach((v, j) => {{
-    let errStr = "&mdash;";
-    if (m !== "max" && e !== "none" && PK_DATA.errBounds[m] && PK_DATA.errBounds[m][e]) {{
-      const lo = PK_DATA.errBounds[m][e].lower[0][j];
-      const hi = PK_DATA.errBounds[m][e].upper[0][j];
-      errStr = `[${{lo.toFixed(2)}}, ${{hi.toFixed(2)}}]`;
+    const val = vals[j];
+    const hasVal = (val !== null && val !== undefined && !isNaN(val));
+    const valStr = hasVal ? val.toFixed(isCRC ? 3 : 2) : "&mdash;";
+    if (isCRC) {{
+      tbody.innerHTML += `<tr><td>${{v}}</td><td>${{valStr}}</td></tr>`;
+    }} else {{
+      let errStr = "&mdash;";
+      if (m !== "max" && e !== "none" && PK_DATA.errBounds[m] && PK_DATA.errBounds[m][e]) {{
+        const lo = PK_DATA.errBounds[m][e].lower[0][j];
+        const hi = PK_DATA.errBounds[m][e].upper[0][j];
+        errStr = `[${{lo.toFixed(2)}}, ${{hi.toFixed(2)}}]`;
+      }}
+      tbody.innerHTML += `<tr><td>${{v}}</td><td>${{valStr}}</td><td>${{errStr}}</td></tr>`;
     }}
-    tbody.innerHTML +=
-      `<tr><td>${{v}}</td><td>${{(vals[j] ?? 0).toFixed(2)}}</td><td>${{errStr}}</td></tr>`;
   }});
 }}
 
@@ -432,6 +487,17 @@ def plot_pet_vials(
     str
         Absolute path to the written HTML file.
     """
+    _VIAL_ORDER = ["1mm", "2mm", "3mm", "4mm", "5mm", "Air", "Water", "Uniform"]
+
+    # Sort vial_niftis so viewer buttons follow the same order as the plot.
+    if vial_niftis:
+        vial_niftis = dict(
+            sorted(
+                vial_niftis.items(),
+                key=lambda kv: _VIAL_ORDER.index(kv[0]) if kv[0] in _VIAL_ORDER else len(_VIAL_ORDER),
+            )
+        )
+
     xlsx = Path(xlsx_path)
 
     def _sheet(name: str) -> Optional[np.ndarray]:
@@ -453,20 +519,38 @@ def plot_pet_vials(
     max_arr = _sheet("max")
     cal_max = float(max_arr.max()) if max_arr is not None and max_arr.size else None
 
-    # ── CRC (vials A–E) ──────────────────────────────────────────────────────
-    crc_3d_arr      = _sheet("crc_3d")
-    crc_sa_arr      = _sheet("crc_slice_avg")
-    _crc_names      = {"A", "B", "C", "D", "E"}
-    _crc_idx        = [i for i, v in enumerate(vials) if v in _crc_names]
-    crc_vials_out   = [vials[i] for i in _crc_idx] if _crc_idx else None
-    crc_3d_out      = [float(crc_3d_arr[i]) for i in _crc_idx] if crc_3d_arr is not None and _crc_idx else None
-    crc_sa_out      = [float(crc_sa_arr[i]) for i in _crc_idx] if crc_sa_arr is not None and _crc_idx else None
+    # ── CRC (sphere vials 1mm–5mm) ────────────────────────────────────────────
+    crc_3d_arr    = _sheet("crc_3d")
+    crc_sa_arr    = _sheet("crc_slice_avg")
+    _crc_names    = {"1mm", "2mm", "3mm", "4mm", "5mm"}
+    _crc_idx      = [i for i, v in enumerate(vials) if v in _crc_names]
+    # Sort by sphere diameter descending (5mm → 1mm) for the static table
+    _crc_idx      = sorted(_crc_idx, key=lambda i: vials[i], reverse=True)
+    crc_vials_out = [vials[i] for i in _crc_idx] if _crc_idx else None
+    crc_3d_out    = [float(crc_3d_arr[i]) for i in _crc_idx] if crc_3d_arr is not None and _crc_idx else None
+    crc_sa_out    = [float(crc_sa_arr[i]) for i in _crc_idx] if crc_sa_arr is not None and _crc_idx else None
 
-    # ── Uniformity (vial H) ──────────────────────────────────────────────────
-    uni_arr   = _sheet("uniformity")
-    _h_idx    = next((i for i, v in enumerate(vials) if v == "H"), None)
-    uni_pct   = float(uni_arr[_h_idx]) if uni_arr is not None and _h_idx is not None else None
-    uni_vial  = "H" if _h_idx is not None else None
+    # Full-length nullable arrays for the interactive chart (None = missing point)
+    def _nullable(arr):
+        if arr is None:
+            return [None] * len(vials)
+        return [None if math.isnan(float(v)) else float(v) for v in arr]
+
+    crc_3d_chart = _nullable(crc_3d_arr)
+    crc_sa_chart = _nullable(crc_sa_arr)
+
+    # ── Uniformity (Uniform ROI) ──────────────────────────────────────────────
+    uni_arr  = _sheet("uniformity")
+    _u_idx   = next((i for i, v in enumerate(vials) if v == "Uniform"), None)
+    uni_pct  = float(uni_arr[_u_idx]) if uni_arr is not None and _u_idx is not None else None
+    uni_vial = "Uniform" if _u_idx is not None else None
+
+    # ── SOR (Air and Water ROIs) ──────────────────────────────────────────────
+    sor_arr       = _sheet("sor")
+    _sor_names    = {"Air", "Water"}
+    _sor_idx      = [i for i, v in enumerate(vials) if v in _sor_names]
+    sor_vials_out = [vials[i] for i in _sor_idx] if _sor_idx else None
+    sor_vals_out  = [float(sor_arr[i]) for i in _sor_idx] if sor_arr is not None and _sor_idx else None
 
     html = build_pet_html(
         vials=vials,
@@ -496,6 +580,10 @@ def plot_pet_vials(
         crc_slice_avg_values=crc_sa_out,
         uniformity_vial=uni_vial,
         uniformity_pct=uni_pct,
+        sor_vials=sor_vials_out,
+        sor_values=sor_vals_out,
+        crc_3d_chart=crc_3d_chart,
+        crc_slice_avg_chart=crc_sa_chart,
     )
 
     output_path = Path(output).with_suffix(".html")
