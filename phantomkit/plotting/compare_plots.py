@@ -298,7 +298,19 @@ def _build_html(
     ref_color_json   = json.dumps(_REFERENCE_COLOR)
 
     # -- Session control rows (toggle button + include-in-mean checkbox)
-    session_controls_html = ""
+    session_controls_html = (
+        '\n    <div style="display:flex;align-items:center;gap:12px;margin-bottom:14px;'
+        'padding-bottom:12px;border-bottom:1px solid var(--border);">'
+        '<button onclick="pkToggleAllSessions()" '
+        'style="padding:5px 16px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text);font-size:14px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Toggle all</button>'
+        '<button onclick="pkToggleAllMean()" '
+        'style="padding:5px 16px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text);font-size:14px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Toggle all in mean</button>'
+        '</div>'
+    )
     for i, sess in enumerate(sessions):
         c = sess["color"]
         lbl = sess["label"]
@@ -537,6 +549,37 @@ function pkUpdateMean() {{
     }});
   chart.data.datasets[MEAN_IDX].data = meanPts;
   chart.update();
+}}
+
+function pkToggleAllSessions() {{
+  const n = SESSIONS.length;
+  let anyHidden = false;
+  for (let i = 0; i < n; i++) {{
+    if (chart.data.datasets[i].hidden) {{ anyHidden = true; break; }}
+  }}
+  const makeVisible = anyHidden;
+  for (let i = 0; i < n; i++) {{
+    chart.data.datasets[i].hidden = !makeVisible;
+    const btn = document.getElementById("pk-sess-btn-" + i);
+    btn.setAttribute("data-visible", makeVisible ? "1" : "0");
+    btn.style.opacity = makeVisible ? "1.0" : "0.35";
+  }}
+  chart.update();
+}}
+
+function pkToggleAllMean() {{
+  const n = SESSIONS.length;
+  let anyUnchecked = false;
+  for (let i = 0; i < n; i++) {{
+    const cb = document.getElementById("pk-incl-" + i);
+    if (cb && !cb.checked) {{ anyUnchecked = true; break; }}
+  }}
+  const makeChecked = anyUnchecked;
+  for (let i = 0; i < n; i++) {{
+    const cb = document.getElementById("pk-incl-" + i);
+    if (cb) cb.checked = makeChecked;
+  }}
+  pkUpdateMean();
 }}
 
 function pkSetRefTemp(temp) {{

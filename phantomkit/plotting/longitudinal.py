@@ -153,7 +153,14 @@ def _build_html(
         )
 
     # -- Per-session toggle buttons
-    session_controls_html = ""
+    session_controls_html = (
+        '\n    <div style="margin-bottom:12px;padding-bottom:10px;border-bottom:1px solid var(--border);">'
+        '<button onclick="pkToggleAllSessions()" '
+        'style="padding:5px 16px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text);font-size:14px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Toggle all</button>'
+        '</div>'
+    )
     for i, sess in enumerate(sessions):
         c = sess["color"]
         lbl = sess["label"]
@@ -172,7 +179,12 @@ def _build_html(
         )
 
     # -- Vial toggle buttons (single row, wrapping)
-    vial_controls_html = ""
+    vial_controls_html = (
+        '<button onclick="pkToggleAllVials()" '
+        'style="padding:5px 16px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text);font-size:14px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Toggle all</button>'
+    )
     for vi, vial in enumerate(vial_list):
         sym = _VIAL_SYMBOLS[vi % len(_VIAL_SYMBOLS)]
         vial_controls_html += (
@@ -422,6 +434,34 @@ function pkToggleVial(idx, btn) {{
   _vialVisible[idx] = !_vialVisible[idx];
   btn.setAttribute("data-visible", _vialVisible[idx] ? "1" : "0");
   btn.style.opacity = _vialVisible[idx] ? "1.0" : "0.35";
+  _updateVisibility();
+}}
+
+function pkToggleAllSessions() {{
+  const anyHidden = _sessVisible.some(function(v) {{ return !v; }});
+  const makeVisible = anyHidden;
+  _sessVisible.fill(makeVisible);
+  for (let i = 0; i < SESSIONS.length; i++) {{
+    const btn = document.getElementById("pk-sess-btn-" + i);
+    if (btn) {{
+      btn.setAttribute("data-visible", makeVisible ? "1" : "0");
+      btn.style.opacity = makeVisible ? "1.0" : "0.35";
+    }}
+  }}
+  _updateVisibility();
+}}
+
+function pkToggleAllVials() {{
+  const anyHidden = _vialVisible.some(function(v) {{ return !v; }});
+  const makeVisible = anyHidden;
+  _vialVisible.fill(makeVisible);
+  for (let vi = 0; vi < VIAL_LIST.length; vi++) {{
+    const btn = document.getElementById("pk-vial-btn-" + vi);
+    if (btn) {{
+      btn.setAttribute("data-visible", makeVisible ? "1" : "0");
+      btn.style.opacity = makeVisible ? "1.0" : "0.35";
+    }}
+  }}
   _updateVisibility();
 }}
 </script>

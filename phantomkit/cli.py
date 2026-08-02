@@ -476,6 +476,8 @@ def run_pipeline(
         scan_input_dir,
         print_header,
         TEMPLATE_DATA_ROOT,
+        _wrap_flat_inputs,
+        _cleanup_staged_input,
     )
     from phantomkit.dwi_processing import (
         scan_directory,
@@ -519,10 +521,13 @@ def run_pipeline(
         "eddy_options": eddy_options or " --slm=linear",
     }
 
+    # ── Stage flat NIfTI/MIF files into per-stem subdirectories if needed ───────
+    effective_input = _wrap_flat_inputs(input_path, output_path)
+
     # ── Directory scan & series classification ───────────────────────────────
     print_header("Input Directory Scan")
-    dirs = scan_directory(str(input_path))
-    scan_info = scan_input_dir(input_path)
+    dirs = scan_directory(str(effective_input))
+    scan_info = scan_input_dir(effective_input)
 
     has_dwi = bool(dirs["candidate_dwi"])
     has_native = bool(scan_info.get("mprage_dirs")) and (
@@ -709,6 +714,10 @@ def run_pipeline(
     else:
         print_header("STAGE 2 — Phantom QC in DWI Space")
         print("  Skipped: Stage 1 did not run.\n")
+
+    # Remove _staged_input/ created by _wrap_flat_inputs (if any)
+    if not nocleanup:
+        _cleanup_staged_input(output_path)
 
     # Remove staging-only DWI directories (contain only tmp/, no final outputs)
     if has_dwi and not nocleanup:
