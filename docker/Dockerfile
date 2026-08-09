@@ -79,10 +79,5 @@ RUN /opt/venv/bin/pip install --no-cache-dir -e .
 WORKDIR /data
 VOLUME ["/data/input", "/data/output"]
 
-# Fallback for the GUI's file browser when no host home directory is mounted
-# over /hostuser (see docker/phantomkit-gui.sh / .bat launchers).
-ENV PHANTOMKIT_HOME=/data
-EXPOSE 7878
-
 ENTRYPOINT ["phantomkit"]
 CMD ["--help"]

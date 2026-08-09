@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import sys
 import threading
 
@@ -23,11 +22,6 @@ _HERE  = Path(__file__).parent
 _TMPL  = _HERE.parent / "template_data"
 _HOST  = "0.0.0.0"
 _PORT  = 7878
-
-# When running in Docker, the container's own home directory (e.g. /root) is
-# empty. PHANTOMKIT_HOME lets the launch script point the file browser at
-# wherever the user's real filesystem was mounted (e.g. /hostuser).
-_BROWSE_ROOT = Path(os.environ.get("PHANTOMKIT_HOME", str(Path.home())))
 
 DWI_STEPS = [
     ("dwidenoise",     "Denoise (dwidenoise)"),
@@ -60,7 +54,7 @@ app = FastAPI(title="PhantomKit")
 @app.get("/api/browse")
 async def browse(path: str = "", mode: str = "dir"):
     """Return directory listing for the browser modal."""
-    target = Path(path).expanduser() if path else _BROWSE_ROOT
+    target = Path(path).expanduser() if path else Path.home()
     if not target.is_dir():
         target = target.parent
     entries = []
@@ -664,7 +658,7 @@ function openBrowser(targetId, mode, targetEl) {
     (mode === 'save')  ? 'Save here' :
     (mode === 'dir')   ? 'Select folder' : 'Select file';
   document.getElementById('browser-overlay').classList.remove('hidden');
-  browseTo(startPath || '');
+  browseTo(startPath || '~');
 }
 
 function openBrowserMulti(listId) {
@@ -674,7 +668,7 @@ function openBrowserMulti(listId) {
   document.getElementById('br-save-row').style.display = 'none';
   document.getElementById('br-select-btn').textContent = 'Add 0 files';
   document.getElementById('browser-overlay').classList.remove('hidden');
-  browseTo('');
+  browseTo('~');
 }
 
 function _updateMultiBtn() {

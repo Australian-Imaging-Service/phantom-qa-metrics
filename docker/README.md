@@ -32,7 +32,6 @@ docker pull arkiev/phantomkit:latest
 
 ```bash
 docker run --rm \
-  --user "$(id -u):$(id -g)" \
   -v /path/to/input:/data/input \
   -v /path/to/output:/data/output \
   phantomkit:latest \
@@ -42,15 +41,10 @@ docker run --rm \
     --phantom SPIRIT
 ```
 
-`--user "$(id -u):$(id -g)"` makes the container write files as *you* instead
-of root, so the output directory doesn't end up requiring `sudo` to modify
-afterwards (see [Troubleshooting](#troubleshooting)).
-
 ### Plotting (compare two HTML reports)
 
 ```bash
 docker run --rm \
-  --user "$(id -u):$(id -g)" \
   -v /path/to/plots:/data/plots \
   phantomkit:latest \
   plot compare-plots \
@@ -58,39 +52,6 @@ docker run --rm \
     /data/plots/T1_mapping_reduced.html \
     -o /data/plots/comparison.html
 ```
-
-### GUI
-
-**Easiest option — no typing needed after the first setup:** download
-[`phantomkit-gui.sh`](phantomkit-gui.sh) (macOS/Linux) or
-[`phantomkit-gui.bat`](phantomkit-gui.bat) (Windows), make sure Docker Desktop
-is running, then double-click the file. It starts the container, mounts your
-whole home/user folder so the GUI's file browser can reach your data, waits
-for the server to come up, and opens it in your default browser
-automatically. Run it again any time to reopen the GUI; it reuses the
-already-running container if one exists.
-
-To stop it: `docker stop phantomkit-gui`.
-
-**Manual equivalent**, if you'd rather run the command yourself:
-
-```bash
-docker run -d --rm \
-  --name phantomkit-gui \
-  --user "$(id -u):$(id -g)" \
-  -p 7878:7878 \
-  -v "$HOME:/hostuser" \
-  -e PHANTOMKIT_HOME=/hostuser \
-  -e HOME=/tmp \
-  phantomkit:latest gui
-```
-
-Then open `http://localhost:7878`. `PHANTOMKIT_HOME` tells the GUI's folder
-browser where to start — point it at whatever host directory you mount so
-you're not stuck browsing the container's empty internal filesystem.
-`--user "$(id -u):$(id -g)"` (with `HOME` overridden to a scratch dir the
-container can actually write to) makes outputs come out owned by you instead
-of root — see [Troubleshooting](#troubleshooting).
 
 ### Interactive shell (debugging)
 
@@ -155,14 +116,3 @@ Any additional paths can be mounted with `-v`.
 **ANTs not found on PATH:** Confirm the symlink exists: `docker run --rm --entrypoint which phantomkit:latest antsRegistration`
 
 **FSL eddy not found:** Verify `FSLDIR`: `docker run --rm --entrypoint bash phantomkit:latest -c 'echo $FSLDIR && ls $FSLDIR/bin/eddy*'`
-
-**Output files owned by root / need `sudo` to edit or delete them:** The
-container has no `USER` set, so by default it runs as root — on Linux (and
-some Docker Desktop configurations) that means anything it writes into a
-bind-mounted output folder is owned by root on the host too. Fix it by
-passing `--user "$(id -u):$(id -g)"` on `docker run` (as in the examples
-above), which makes the container write as your own user/group instead. If
-you already have root-owned files from a previous run, reclaim them once
-with `sudo chown -R "$(id -u):$(id -g)" /path/to/output`. The GUI launcher
-scripts ([phantomkit-gui.sh](phantomkit-gui.sh) /
-[phantomkit-gui.bat](phantomkit-gui.bat)) already do this for you.
