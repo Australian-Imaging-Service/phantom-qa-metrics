@@ -46,9 +46,9 @@ for _ in $(seq 1 60); do
 done
 
 if command -v open >/dev/null 2>&1; then
-    open "$URL"           # macOS
+    open "$URL" 2>/dev/null || echo "Open your browser to: ${URL}"           # macOS
 elif command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "$URL"       # Linux
+    xdg-open "$URL" 2>/dev/null || echo "Open your browser to: ${URL}"       # Linux
 else
     echo "Open your browser to: ${URL}"
 fi
