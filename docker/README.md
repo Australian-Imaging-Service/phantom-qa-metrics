@@ -64,11 +64,14 @@ docker run --rm \
 **Easiest option — no typing needed after the first setup:** download
 [`phantomkit-gui.sh`](phantomkit-gui.sh) (macOS/Linux) or
 [`phantomkit-gui.bat`](phantomkit-gui.bat) (Windows), make sure Docker Desktop
-is running, then double-click the file. It starts the container, mounts your
-whole home/user folder so the GUI's file browser can reach your data, waits
-for the server to come up, and opens it in your default browser
-automatically. Run it again any time to reopen the GUI; it reuses the
-already-running container if one exists.
+is running, then double-click the file. It pulls the latest image, mounts
+your home folder plus common external-drive locations (`/media`, `/mnt`,
+`/Volumes`) so the GUI's file browser can reach your data wherever it
+actually lives, waits for the server to come up, and opens it in your
+default browser automatically. Run it again any time to reopen the GUI —
+it always restarts fresh so you're never left running a stale container
+after an image update. If your data lives somewhere else entirely, set
+`PHANTOMKIT_EXTRA_MOUNT=/path/to/your/data` before running the script.
 
 To stop it: `docker stop phantomkit-gui`.
 
@@ -79,15 +82,19 @@ docker run -d --rm \
   --name phantomkit-gui \
   --user "$(id -u):$(id -g)" \
   -p 7878:7878 \
-  -v "$HOME:/hostuser" \
-  -e PHANTOMKIT_HOME=/hostuser \
+  -v "$HOME:$HOME" \
+  -v "/media:/media" \
+  -e PHANTOMKIT_HOME="$HOME" \
   -e HOME=/tmp \
   phantomkit:latest gui
 ```
 
-Then open `http://localhost:7878`. `PHANTOMKIT_HOME` tells the GUI's folder
-browser where to start — point it at whatever host directory you mount so
-you're not stuck browsing the container's empty internal filesystem.
+Then open `http://localhost:7878`. Mounting host paths at their own
+identical path (rather than remapping, e.g., `$HOME` to some other
+in-container path) avoids any path-translation confusion — whatever you
+browse to on the host is the same path inside the container. Add more `-v
+<path>:<path>` mounts for any other locations your data lives in.
+`PHANTOMKIT_HOME` tells the GUI's folder browser where to start.
 `--user "$(id -u):$(id -g)"` (with `HOME` overridden to a scratch dir the
 container can actually write to) makes outputs come out owned by you instead
 of root — see [Troubleshooting](#troubleshooting).

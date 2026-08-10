@@ -155,19 +155,20 @@ async def run_pipeline(r: PipelineReq):
     # Create output/<subject_name>/ from the original input dir basename.
     subject_name = input_path.name
     actual_output = Path(r.output_dir) / subject_name
-    actual_output.mkdir(parents=True, exist_ok=True)
-
-    cmd = [sys.executable, "-m", "phantomkit", "pipeline",
-           "--input-dir",  str(actual_input),
-           "--output-dir", str(actual_output),
-           "--phantom",    r.phantom]
-    if r.steps:        cmd += ["--processing-steps", ",".join(r.steps)]
-    if r.nocleanup:    cmd.append("--nocleanup")
-    if r.dry_run:      cmd.append("--dry-run")
-    if r.readout_time: cmd += ["--readout-time", r.readout_time]
-    if r.eddy_options: cmd += ["--eddy-options",  r.eddy_options]
 
     async def _stream_with_header():
+        # mkdir happens inside the stream (rather than before the
+        # StreamingResponse is constructed) so a failure — e.g. the path
+        # isn't actually mounted into the container — shows up as a log
+        # line instead of a bare 500 that the frontend's SSE reader can
+        # never surface, leaving the UI looking permanently hung.
+        try:
+            actual_output.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            yield f"data:{json.dumps(f'ERROR: could not create output directory {actual_output}: {e}\n')}\n\n"
+            yield f"data:{json.dumps('__done__1')}\n\n"
+            return
+
         header = (
             f"Input:  {actual_input}\n"
             f"Output: {actual_output}\n"
@@ -176,6 +177,17 @@ async def run_pipeline(r: PipelineReq):
             + "\n"
         )
         yield f"data:{json.dumps(header)}\n\n"
+
+        cmd = [sys.executable, "-m", "phantomkit", "pipeline",
+               "--input-dir",  str(actual_input),
+               "--output-dir", str(actual_output),
+               "--phantom",    r.phantom]
+        if r.steps:        cmd += ["--processing-steps", ",".join(r.steps)]
+        if r.nocleanup:    cmd.append("--nocleanup")
+        if r.dry_run:      cmd.append("--dry-run")
+        if r.readout_time: cmd += ["--readout-time", r.readout_time]
+        if r.eddy_options: cmd += ["--eddy-options",  r.eddy_options]
+
         async for chunk in _stream(cmd):
             yield chunk
 

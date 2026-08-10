@@ -6,15 +6,27 @@
 #   2. Double-click this file (or run it from a terminal:
 #      `bash phantomkit-gui.sh`).
 #
-# Your entire home folder is mounted read/write into the container so the
-# GUI's built-in file browser can reach your scan data wherever it lives —
-# no need to move files into a special folder first.
+# Your home folder, plus common external/removable-drive mount points
+# (/media, /mnt, /Volumes), are mounted read/write into the container at
+# their own real paths — no host/container path remapping — so the GUI's
+# file browser can reach your scan data wherever it actually lives. Set
+# PHANTOMKIT_EXTRA_MOUNT to also mount some other location.
 set -euo pipefail
 
 IMAGE="${PHANTOMKIT_IMAGE:-arkiev/phantomkit:latest}"
 PORT="${PHANTOMKIT_PORT:-7878}"
 NAME="phantomkit-gui"
 URL="http://localhost:${PORT}"
+
+MOUNT_ARGS=(-v "${HOME}:${HOME}")
+for extra in /media /mnt /Volumes; do
+    if [ -d "$extra" ]; then
+        MOUNT_ARGS+=(-v "${extra}:${extra}")
+    fi
+done
+if [ -n "${PHANTOMKIT_EXTRA_MOUNT:-}" ] && [ -d "${PHANTOMKIT_EXTRA_MOUNT}" ]; then
+    MOUNT_ARGS+=(-v "${PHANTOMKIT_EXTRA_MOUNT}:${PHANTOMKIT_EXTRA_MOUNT}")
+fi
 
 if ! docker info >/dev/null 2>&1; then
     echo "Docker doesn't seem to be running. Please start Docker Desktop and try again."
@@ -34,8 +46,8 @@ docker run -d --rm \
     --name "$NAME" \
     --user "$(id -u):$(id -g)" \
     -p "${PORT}:7878" \
-    -v "${HOME}:/hostuser" \
-    -e PHANTOMKIT_HOME=/hostuser \
+    "${MOUNT_ARGS[@]}" \
+    -e PHANTOMKIT_HOME="${HOME}" \
     -e HOME=/tmp \
     "$IMAGE" gui >/dev/null
 
