@@ -22,20 +22,22 @@ if ! docker info >/dev/null 2>&1; then
     exit 1
 fi
 
-if docker ps --format '{{.Names}}' | grep -qx "$NAME"; then
-    echo "PhantomKit GUI is already running → ${URL}"
-else
-    docker rm -f "$NAME" >/dev/null 2>&1 || true
-    echo "Starting PhantomKit GUI (first run may take a moment to pull the image)…"
-    docker run -d --rm \
-        --name "$NAME" \
-        --user "$(id -u):$(id -g)" \
-        -p "${PORT}:7878" \
-        -v "${HOME}:/hostuser" \
-        -e PHANTOMKIT_HOME=/hostuser \
-        -e HOME=/tmp \
-        "$IMAGE" gui >/dev/null
-fi
+echo "Checking for a newer image (${IMAGE})…"
+docker pull "$IMAGE" || echo "Warning: couldn't reach Docker Hub — using whatever's cached locally."
+
+# Always restart fresh rather than silently reusing whatever's already
+# running under this name — otherwise a container started from a stale
+# image before an update just keeps serving forever.
+docker rm -f "$NAME" >/dev/null 2>&1 || true
+echo "Starting PhantomKit GUI…"
+docker run -d --rm \
+    --name "$NAME" \
+    --user "$(id -u):$(id -g)" \
+    -p "${PORT}:7878" \
+    -v "${HOME}:/hostuser" \
+    -e PHANTOMKIT_HOME=/hostuser \
+    -e HOME=/tmp \
+    "$IMAGE" gui >/dev/null
 
 echo "Waiting for the server to come up…"
 for _ in $(seq 1 60); do
