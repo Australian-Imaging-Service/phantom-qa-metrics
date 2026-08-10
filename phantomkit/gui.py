@@ -105,10 +105,15 @@ async def serve_html(path: str = ""):
 # ── Streaming runner ─────────────────────────────────────────────────────────
 
 async def _stream(cmd: list[str]):
+    # PYTHONUNBUFFERED: without it, the child's stdout is fully block-buffered
+    # (it's a pipe, not a tty), so print()-based progress from a long-running
+    # pipeline run never reaches the browser until the process exits.
+    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
     proc = await asyncio.create_subprocess_exec(
         *cmd,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        env=env,
     )
     assert proc.stdout
     async for raw in proc.stdout:
