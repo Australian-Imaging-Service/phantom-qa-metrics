@@ -418,7 +418,6 @@ button { cursor: pointer; border: none; border-radius: 6px;
 <nav class="tabs">
   <button class="tab active" onclick="switchTab('pipeline', this)">Pipeline</button>
   <button class="tab"        onclick="switchTab('compare',  this)">Compare</button>
-  <button class="tab"        onclick="switchTab('longitudinal', this)">Longitudinal</button>
 </nav>
 
 <!-- ══════════════════════════════════ PIPELINE ══════════════════════════════ -->
@@ -509,46 +508,18 @@ button { cursor: pointer; border: none; border-radius: 6px;
       <label>Phantom <span class="hint">(optional)</span></label>
       <select id="c-phantom" style="max-width:220px"></select>
     </div>
+    <label class="check-row">
+      <input type="checkbox" id="c-longitudinal">
+      <span>Longitudinal analysis
+        <span class="hint">— plot per-vial trends across sessions instead of a side-by-side comparison</span>
+      </span>
+    </label>
   </div>
 
   <div class="run-row">
     <button class="btn-primary" id="c-run-btn" onclick="runCompare()">▶&nbsp;Run</button>
   </div>
   <div class="log" id="c-log"></div>
-
-</section>
-
-<!-- ══════════════════════════════════ LONGITUDINAL ══════════════════════════ -->
-<section id="tab-longitudinal" class="tab-content">
-
-  <div class="card">
-    <div class="card-title">Input HTML files</div>
-    <div class="file-list" id="l-file-list"></div>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
-      <button class="btn-sm" onclick="addFileRow('l-file-list','html')">+ Add file</button>
-      <button class="btn-sm" onclick="openBrowserMulti('l-file-list')">+ Add multiple…</button>
-    </div>
-  </div>
-
-  <div class="card">
-    <div class="card-title">Output</div>
-    <div class="field-row">
-      <label>Output HTML</label>
-      <div class="input-group">
-        <input type="text" id="l-output" placeholder="/path/to/longitudinal.html">
-        <button class="btn-sm" onclick="openBrowser('l-output','save')">Save as…</button>
-      </div>
-    </div>
-    <div class="field-row">
-      <label>Phantom <span class="hint">(optional)</span></label>
-      <select id="l-phantom" style="max-width:220px"></select>
-    </div>
-  </div>
-
-  <div class="run-row">
-    <button class="btn-primary" id="l-run-btn" onclick="runLongitudinal()">▶&nbsp;Run</button>
-  </div>
-  <div class="log" id="l-log"></div>
 
 </section>
 
@@ -580,7 +551,7 @@ const DWI_STEPS = __STEPS__;
 // ── Initialise selects and checkboxes ────────────────────────────────────────
 (function init() {
   // Phantom dropdowns
-  ['p-phantom','c-phantom','l-phantom'].forEach(function(id) {
+  ['p-phantom','c-phantom'].forEach(function(id) {
     var sel = document.getElementById(id);
     var opts = (id === 'p-phantom') ? PHANTOMS : ['(auto-detect)', ...PHANTOMS];
     opts.forEach(function(p) {
@@ -604,7 +575,6 @@ const DWI_STEPS = __STEPS__;
 
   // Initial file rows
   addFileRow('c-file-list', 'html');
-  addFileRow('l-file-list', 'html');
 })();
 
 // ── Tab switching ────────────────────────────────────────────────────────────
@@ -962,39 +932,24 @@ function runPipeline() {
   });
 }
 
-// ── Compare ───────────────────────────────────────────────────────────────────
+// ── Compare / Longitudinal ───────────────────────────────────────────────────
 function runCompare() {
-  var rows   = getFileRows('c-file-list');
-  var output = document.getElementById('c-output').value.trim();
-  var phantom = document.getElementById('c-phantom').value;
+  var rows        = getFileRows('c-file-list');
+  var output      = document.getElementById('c-output').value.trim();
+  var phantom     = document.getElementById('c-phantom').value;
+  var longitudinal = document.getElementById('c-longitudinal').checked;
   if (rows.files.length < 2) { alert('Select at least two HTML files.'); return; }
   if (!output)               { alert('Choose an output HTML path.'); return; }
 
-  streamRun('/api/run/compare', {
+  var endpoint = longitudinal ? '/api/run/longitudinal' : '/api/run/compare';
+
+  streamRun(endpoint, {
     html_files: rows.files,
     labels:     rows.labels,
     output:     output,
     phantom:    phantom === '(auto-detect)' ? '' : phantom,
   }, 'c-log', 'c-run-btn', function() {
     showHtmlButtons('c-log', [output]);
-  });
-}
-
-// ── Longitudinal ──────────────────────────────────────────────────────────────
-function runLongitudinal() {
-  var rows   = getFileRows('l-file-list');
-  var output = document.getElementById('l-output').value.trim();
-  var phantom = document.getElementById('l-phantom').value;
-  if (rows.files.length < 2) { alert('Select at least two HTML files.'); return; }
-  if (!output)               { alert('Choose an output HTML path.'); return; }
-
-  streamRun('/api/run/longitudinal', {
-    html_files: rows.files,
-    labels:     rows.labels,
-    output:     output,
-    phantom:    phantom === '(auto-detect)' ? '' : phantom,
-  }, 'l-log', 'l-run-btn', function() {
-    showHtmlButtons('l-log', [output]);
   });
 }
 </script>
