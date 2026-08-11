@@ -113,7 +113,7 @@ When called through the pipeline, DWI series each get their own subdirectory:
         T1_in_DWI_space.nii.gz
         metrics/
         vial_segmentations/
-      native_contrasts_staging/
+      native_contrasts/
         metrics/
         vial_segmentations/
         images_template_space/

@@ -196,8 +196,8 @@ def _derive_labels(paths: list[str]) -> list[str]:
 
     Example::
 
-        P000009_testing/native_contrasts_staging/metrics/plots/T1_mapping.html
-        P000008_html/native_contrasts_staging/metrics/plots/T1_mapping.html
+        P000009_testing/native_contrasts/metrics/plots/T1_mapping.html
+        P000008_html/native_contrasts/metrics/plots/T1_mapping.html
         → labels: ["P000009_testing", "P000008_html"]
     """
     if len(paths) == 1:

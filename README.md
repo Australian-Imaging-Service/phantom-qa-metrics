@@ -99,7 +99,7 @@ Output structure:
     T1_in_DWI_space.nii.gz
     metrics/                      ← per-vial CSVs and QA plots
     vial_segmentations/
-  native_contrasts_staging/
+  native_contrasts/
     metrics/                      ← per-vial CSVs and parametric map plots
     vial_segmentations/
     images_template_space/

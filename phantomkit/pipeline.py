@@ -506,7 +506,7 @@ def run_stage3(
         return
 
     session_name = derive_session_name(input_dir)
-    staging_dir = output_dir / "native_contrasts_staging"
+    staging_dir = output_dir / "native_contrasts"
 
     print(f"  Session name:    {session_name}")
     print(f"  Staging folder:  {staging_dir}")
@@ -619,7 +619,7 @@ def run_stage3(
         n_threads=n_threads,
         scan_date=scan_date,
     )
-    processor.process_session(str(t1_nii_path), output_dir=output_dir)
+    processor.process_session(str(t1_nii_path), output_dir=staging_dir)
 
     # Clean up staging NIfTIs only — leave processed outputs in place
     print(f"\n  Removing temporary NIfTIs from staging folder: {staging_dir}")
