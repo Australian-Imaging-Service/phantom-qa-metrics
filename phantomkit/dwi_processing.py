@@ -320,15 +320,28 @@ def convert_series_to_nii(series_dir: str, out_dir: str) -> dict:
         bvec = str(Path(out_dir) / f"{stem}.bvec")
         bval = str(Path(out_dir) / f"{stem}.bval")
         json_out = str(Path(out_dir) / f"{stem}.json")
-        subprocess.run(
-            [
-                "mrconvert", str(mif_src), nii,
-                "-export_grad_fsl", bvec, bval,
-                "-json_export", json_out,
-            ],
-            check=True,
-            capture_output=True,
-        )
+        try:
+            subprocess.run(
+                [
+                    "mrconvert", str(mif_src), nii,
+                    "-export_grad_fsl", bvec, bval,
+                    "-json_export", json_out,
+                ],
+                check=True,
+                capture_output=True,
+            )
+        except subprocess.CalledProcessError:
+            # No diffusion gradient scheme in this image's header — e.g. an
+            # anatomical MPRAGE stored as MIF rather than DWI/reverse-PE.
+            # mrconvert can't export a gradient table that doesn't exist,
+            # so fall back to a plain conversion without gradient export.
+            for p in (nii, bvec, bval, json_out):
+                Path(p).unlink(missing_ok=True)
+            subprocess.run(
+                ["mrconvert", str(mif_src), nii, "-json_export", json_out],
+                check=True,
+                capture_output=True,
+            )
         return {
             "nii": nii,
             "json": json_out if Path(json_out).exists() else "",

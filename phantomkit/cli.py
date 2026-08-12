@@ -4,6 +4,7 @@ import importlib
 import logging
 import pkgutil
 import shutil
+import subprocess
 from pathlib import Path
 from typing import get_args, get_origin
 
@@ -17,6 +18,18 @@ logger = logging.getLogger(__name__)
 # Fields that are internal to pydra or used for input routing
 _SKIP_FIELDS = frozenset({"constructor"})
 _INPUT_FIELD_NAMES = frozenset({"input_image", "input_images"})
+
+
+def _format_exc(exc: BaseException) -> str:
+    """Format an exception for display, including captured subprocess
+    stderr — CalledProcessError's default str() only shows the command
+    and exit code, silently dropping the actual error output."""
+    if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+        stderr = exc.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return f"{exc}\n{stderr.strip()}"
+    return str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -704,9 +717,9 @@ def run_pipeline(
         )
 
     if stage1_error:
-        raise click.ClickException(f"Stage 1 failed: {stage1_error}")
+        raise click.ClickException(f"Stage 1 failed: {_format_exc(stage1_error)}")
     if stage3_error:
-        raise click.ClickException(f"Stage 3 failed: {stage3_error}")
+        raise click.ClickException(f"Stage 3 failed: {_format_exc(stage3_error)}")
 
     # Stage 2: phantom QC in DWI space (sequential — needs Stage 1 outputs)
     if dwi_output_dirs:
