@@ -176,6 +176,132 @@ def _wrap_flat_inputs(input_dir: Path, output_dir: Path) -> Path:
     return staged
 
 
+def _has_classifiable_series(staged_dir: Path) -> bool:
+    """True if scan_input_dir finds at least one recognizable series subdirectory."""
+    info = scan_input_dir(staged_dir)
+    return bool(
+        info["mprage_dirs"] or info["ti_dirs"] or info["te_dirs"] or info["dwi_dirs"]
+    )
+
+
+def _relabel_dwi_pe_collisions(staged_dir: Path) -> None:
+    """
+    dcm2niix's SeriesDescription-based naming (-f "%d") can't distinguish
+    forward/reverse phase-encode DWI acquisitions when both share the same
+    SeriesDescription in the raw DICOM — common, since the scanner protocol
+    often doesn't encode AP vs PA in that field at all — leaving both
+    without a fwd/rpe direction tag that classify_candidates() /
+    match_ap_pa_pairs() (dwi_processing.py) can use for pairing.
+
+    For any DWI-with-gradients NIfTI in staged_dir whose name has no
+    existing FWD_DIRS/RPE_DIRS tag, but whose JSON sidecar has an
+    anterior-posterior (j/j-) PhaseEncodingDirection, rename it (plus its
+    .json/.bvec/.bval sidecars) to append _AP or _PA so the existing
+    tag-based pairing logic can find it.
+
+    NOTE: the j- -> AP / j -> PA sign mapping is confirmed for this site's
+    acquisition convention (from a known-correct, manually-labeled example)
+    but is not a universal DICOM guarantee — it could be reversed for a
+    different scanner/protocol's coordinate setup. Series on any other
+    phase-encode axis (not "j"/"j-") are left untouched rather than guessed.
+    """
+    import json
+
+    from phantomkit.dwi_processing import FWD_DIRS, RPE_DIRS
+
+    tag_pattern = re.compile(
+        rf"_({'|'.join(re.escape(d) for d in FWD_DIRS + RPE_DIRS)})(_|$)",
+        re.IGNORECASE,
+    )
+
+    for nii in sorted(staged_dir.glob("*.nii.gz")):
+        stem = nii.name[: -len(".nii.gz")]
+        if tag_pattern.search(stem):
+            continue  # already has a usable PE tag
+
+        json_path = staged_dir / f"{stem}.json"
+        bvec_path = staged_dir / f"{stem}.bvec"
+        bval_path = staged_dir / f"{stem}.bval"
+        if not json_path.exists() or not bvec_path.exists() or not bval_path.exists():
+            continue  # not a DWI-with-gradients acquisition
+
+        try:
+            pe_dir = json.loads(json_path.read_text()).get("PhaseEncodingDirection", "")
+        except (OSError, ValueError):
+            continue
+
+        if pe_dir not in ("j", "j-"):
+            continue  # not an AP-axis acquisition (or field missing) — leave alone
+
+        # Strip a trailing, dcm2niix-added collision-disambiguation suffix
+        # (e.g. "..._PAa" -> "..."), if any, so the tag we append below reads
+        # cleanly rather than stacking on top of it (e.g. "..._PAa_AP").
+        stem_base = re.sub(r"_(?:PA|AP)[a-z]*$", "", stem, flags=re.IGNORECASE)
+        new_stem = f"{stem_base}_{'AP' if pe_dir == 'j-' else 'PA'}"
+
+        for ext in (".nii.gz", ".json", ".bvec", ".bval"):
+            src = staged_dir / f"{stem}{ext}"
+            if src.exists():
+                src.rename(staged_dir / f"{new_stem}{ext}")
+
+
+def _stage_input(input_dir: Path, output_dir: Path) -> Path:
+    """
+    Prepare input_dir for classification.
+
+    1. Stage flat NIfTI/MIF files via _wrap_flat_inputs (existing behavior,
+       runs regardless of --dry-run — it's detection/staging, not
+       processing, same as this function's own fallback below).
+    2. If nothing is classifiable afterward — e.g. a "foreign" DICOM dump
+       with no per-series subdirectories at all — fall back to running
+       dcm2niix across the WHOLE original input_dir tree (dcm2niix recurses
+       into subdirectories on its own), producing a flat pile of
+       SeriesDescription-named NIfTIs, then relabel any AP/PA naming
+       collisions and stage the result via _wrap_flat_inputs too.
+    3. If the fallback also fails or finds nothing, return the original
+       staged result unchanged — existing downstream messaging ("No MPRAGE
+       directory found" etc.) already handles the empty case.
+    """
+    staged = _wrap_flat_inputs(input_dir, output_dir)
+    if _has_classifiable_series(staged):
+        return staged
+
+    print(
+        "  No organized series subdirectories found — attempting to "
+        "auto-split a flat/foreign DICOM dump via dcm2niix...\n"
+    )
+    dicom_out = output_dir / "_staged_dicom"
+    if dicom_out.exists():
+        shutil.rmtree(dicom_out)
+    dicom_out.mkdir(parents=True, exist_ok=True)
+
+    try:
+        subprocess.run(
+            ["dcm2niix", "-z", "y", "-f", "%d", "-o", str(dicom_out), str(input_dir)],
+            check=True, capture_output=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        detail = ""
+        if isinstance(e, subprocess.CalledProcessError) and e.stderr:
+            detail = "\n" + e.stderr.decode(errors="replace").strip()
+        print(f"  dcm2niix fallback failed: {e}{detail}\n")
+        return staged
+
+    if not any(dicom_out.glob("*.nii.gz")):
+        return staged
+
+    _relabel_dwi_pe_collisions(dicom_out)
+
+    # Clear a stale _staged_input from the no-op _wrap_flat_inputs call above
+    # so the second round starts clean instead of merging with content
+    # already determined to be non-classifiable.
+    prior_staged_input = output_dir / "_staged_input"
+    if prior_staged_input.exists():
+        shutil.rmtree(prior_staged_input)
+
+    return _wrap_flat_inputs(dicom_out, output_dir)
+
+
 def stage_series_dir(series_dir: Path, out_dir: Path) -> list:
     """
     Stage a series directory into out_dir as .nii.gz files.
@@ -257,9 +383,9 @@ def scan_input_dir(input_dir: Path) -> dict:
 
         if re.search(r"MPRAGE", name, re.IGNORECASE):
             mprage_dirs.append(d)
-        elif re.search(r"T1_MAPS|se_ir|(?<![a-z0-9])TI(?![a-z0-9])", name, re.IGNORECASE):
+        elif re.search(r"T1_MAPS|se_ir|(?<![a-z0-9])TI(?:(?=\d)|(?![a-z0-9]))", name, re.IGNORECASE):
             ti_dirs.append(d)
-        elif re.search(r"t2_se|(?<![a-z0-9])te(?![a-z0-9])", name, re.IGNORECASE):
+        elif re.search(r"t2_se|(?<![a-z0-9])te(?:(?=\d)|(?![a-z0-9]))", name, re.IGNORECASE):
             te_dirs.append(d)
         elif re.search(r"(_diff_|_DWI_)", name, re.IGNORECASE):
             dwi_dirs.append(d)
@@ -786,15 +912,16 @@ def validate_inputs(input_dir: Path, phantom: str) -> None:
 
 
 def _cleanup_staged_input(output_dir: Path, dry_run: bool = False) -> None:
-    """Remove output_dir/_staged_input/ if it was created by _wrap_flat_inputs."""
-    staged = output_dir / "_staged_input"
-    if not staged.exists():
-        return
-    if dry_run:
-        print(f"  [DRY RUN] Would remove staging directory: {staged.name}")
-        return
-    shutil.rmtree(staged)
-    print(f"  Removed staging directory: {staged.name}")
+    """Remove output_dir/_staged_input/ and _staged_dicom/ if created by staging."""
+    for name in ("_staged_input", "_staged_dicom"):
+        staged = output_dir / name
+        if not staged.exists():
+            continue
+        if dry_run:
+            print(f"  [DRY RUN] Would remove staging directory: {staged.name}")
+            continue
+        shutil.rmtree(staged)
+        print(f"  Removed staging directory: {staged.name}")
 
 
 def _cleanup_tmp_only_dirs(output_dir: Path) -> None:
@@ -855,7 +982,7 @@ def run_full_pipeline(
         print(f"  All outputs written to: {output_dir}\n")
         return output_dir
 
-    input_dir = _wrap_flat_inputs(input_dir, output_dir)
+    input_dir = _stage_input(input_dir, output_dir)
 
     dwi_cfg = {
         "denoise_degibbs": denoise_degibbs,

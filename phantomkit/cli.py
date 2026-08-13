@@ -489,7 +489,7 @@ def run_pipeline(
         scan_input_dir,
         print_header,
         TEMPLATE_DATA_ROOT,
-        _wrap_flat_inputs,
+        _stage_input,
         _cleanup_staged_input,
     )
     from phantomkit.dwi_processing import (
@@ -534,8 +534,8 @@ def run_pipeline(
         "eddy_options": eddy_options or " --slm=linear",
     }
 
-    # ── Stage flat NIfTI/MIF files into per-stem subdirectories if needed ───────
-    effective_input = _wrap_flat_inputs(input_path, output_path)
+    # ── Stage flat NIfTI/MIF files, or a foreign DICOM dump, if needed ──────────
+    effective_input = _stage_input(input_path, output_path)
 
     # ── Directory scan & series classification ───────────────────────────────
     print_header("Input Directory Scan")
