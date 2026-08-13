@@ -103,16 +103,24 @@ def _compute_fits_ir(vial_groups, vial_to_idx, data_matrix, contrast_numbers):
 
 def extract_numeric(label):
     """
-    Extract the last numeric value from a string label.
+    Extract the inversion time from a filename label.
 
-    Used to extract inversion times from filenames (e.g., 'IR_500' → 500)
+    Matches the number immediately following a 'TI' or 'IR' token (e.g.
+    'TI_500' or 'SIM-TI1100ms' -> 500 / 1100), so a trailing, unrelated
+    scan reference number appended during staging (e.g. 'TI_1000_19',
+    where 1000 is the inversion time and 19 is a series number) isn't
+    mistaken for it. Falls back to the last number in the label when no
+    'TI'/'IR' token is present.
 
     Args:
-        label: String containing numbers (e.g., 'contrast_100')
+        label: String containing numbers (e.g., 'IR_500')
 
     Returns:
-        Last integer found in the string, or None if no numbers found
+        The inversion time, or None if no numbers found.
     """
+    token_match = re.search(r"(?:TI|IR)[_-]?(\d+)", label, re.IGNORECASE)
+    if token_match:
+        return int(token_match.group(1))
     numbers = re.findall(r"\d+", label)
     return int(numbers[-1]) if numbers else None
 

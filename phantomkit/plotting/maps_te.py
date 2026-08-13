@@ -103,16 +103,24 @@ def _compute_fits_te(vial_groups, vial_to_idx, data_matrix, contrast_numbers):
 
 def extract_numeric(label):
     """
-    Extract the last numeric value from a string label.
+    Extract the echo time from a filename label.
 
-    Used to extract echo times from filenames (e.g., 'SE_80' → 80)
+    Matches the number immediately following a 'TE' token (e.g.
+    'TE_80' or 'SIM-TE83ms' -> 80 / 83), so a trailing, unrelated scan
+    reference number appended during staging (e.g. 'TE_14_34', where 14
+    is the echo time and 34 is a series number) isn't mistaken for it.
+    Falls back to the last number in the label when no 'TE' token is
+    present.
 
     Args:
-        label: String containing numbers (e.g., 'contrast_100')
+        label: String containing numbers (e.g., 'SE_80')
 
     Returns:
-        Last integer found in the string, or None if no numbers found
+        The echo time, or None if no numbers found.
     """
+    token_match = re.search(r"TE[_-]?(\d+)", label, re.IGNORECASE)
+    if token_match:
+        return int(token_match.group(1))
     numbers = re.findall(r"\d+", label)
     return int(numbers[-1]) if numbers else None
 
