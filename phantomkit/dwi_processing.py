@@ -494,6 +494,26 @@ def classify_candidates(candidate_dwi: list, conversions: dict) -> dict:
             re.search(rf"_{re.escape(d)}(_|$)", name, re.IGNORECASE) for d in RPE_DIRS
         )
 
+        # Best-effort check that the folder name's implied PE direction
+        # actually matches the header — catches a human mislabeling a
+        # folder. Classification above stays name-based either way.
+        try:
+            name_pe, _ = detect_pe_direction(name)
+        except ValueError:
+            name_pe = None
+        if name_pe is not None and conv.get("json"):
+            try:
+                header_pe, _ = get_pe_from_json(conv["json"])
+            except ValueError:
+                header_pe = None
+            if header_pe is not None and header_pe != name_pe:
+                print(
+                    f"  WARNING: {name} folder name implies phase-encode "
+                    f"direction {name_pe}, but the header's "
+                    f"PhaseEncodingDirection implies {header_pe} — check "
+                    f"the folder name is correct.\n"
+                )
+
         if is_b0_only:
             # All b-values zero: classify as PE correction image by direction tag
             if has_fwd_tag:

@@ -340,8 +340,10 @@ def stage_series_dir(series_dir: Path, out_dir: Path) -> list:
                     stem = stem[: -len(ext)]
                     break
             dst = out_dir / f"{stem}.nii.gz"
+            json_out = out_dir / f"{stem}.json"
             subprocess.run(
-                ["mrconvert", str(mif), str(dst)], check=True, capture_output=True
+                ["mrconvert", str(mif), str(dst), "-json_export", str(json_out)],
+                check=True, capture_output=True,
             )
             produced.append(str(dst))
         if not produced:
@@ -607,6 +609,61 @@ def run_calibration_plot(
 # ---------------------------------------------------------------------------
 
 
+def _json_sidecar_for(nii_path: str) -> Path:
+    """Return the path a NIfTI's JSON sidecar would have, if one exists."""
+    p = Path(nii_path)
+    stem = p.name
+    for ext in (".nii.gz", ".nii"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return p.parent / f"{stem}.json"
+
+
+def _validate_te_ti_header(series_dir: Path, produced: list, kind: str) -> None:
+    """
+    Warn if the TE/TI value implied by series_dir's name doesn't match the
+    EchoTime/InversionTime recorded in the staged NIfTI's JSON sidecar (if
+    one exists — MIF-origin series only have one now that stage_series_dir
+    requests -json_export; DICOM always produces one; pre-existing NIfTI
+    input only has one if the source directory did).
+
+    Best-effort: silently does nothing if there's no JSON, no matching
+    header field, or no TE/TI token in the name to compare against.
+    """
+    import json as _json
+
+    if kind == "te":
+        from phantomkit.plotting.maps_te import extract_numeric
+        header_field = "EchoTime"
+    else:
+        from phantomkit.plotting.maps_ir import extract_numeric
+        header_field = "InversionTime"
+
+    name_value = extract_numeric(series_dir.name)
+    if name_value is None or not produced:
+        return
+
+    json_path = _json_sidecar_for(produced[0])
+    if not json_path.exists():
+        return
+    try:
+        header_value = _json.loads(json_path.read_text()).get(header_field)
+    except (OSError, ValueError):
+        return
+    if header_value is None:
+        return
+
+    header_ms = round(float(header_value) * 1000)
+    if abs(header_ms - name_value) > 1:
+        print(
+            f"  WARNING: {series_dir.name} folder name implies "
+            f"{kind.upper()}={name_value}ms, but the staged image's "
+            f"{header_field} header says {header_ms}ms — check the folder "
+            f"name is correct.\n"
+        )
+
+
 def run_stage3(
     input_dir: Path,
     output_dir: Path,
@@ -669,6 +726,10 @@ def run_stage3(
             print(f"    Produced: {[Path(p).name for p in produced]}")
             if series_dir == primary_mprage_dir:
                 t1_nii_path = Path(produced[0])
+            elif series_dir in ti_dirs:
+                _validate_te_ti_header(series_dir, produced, "ti")
+            elif series_dir in te_dirs:
+                _validate_te_ti_header(series_dir, produced, "te")
         except Exception as e:
             print(f"  WARNING: Staging failed for {series_dir.name}: {e}")
             if series_dir == primary_mprage_dir:
