@@ -752,3 +752,77 @@ def run_pipeline(
 
     print_header("Pipeline Complete")
     print(f"  All outputs written to: {output_path}\n")
+
+
+@main.command("vendor-compare")
+@click.option(
+    "--output-dir",
+    required=True,
+    help="Completed pipeline's session output directory.",
+)
+@click.option(
+    "--vendor-image",
+    required=True,
+    type=click.Path(exists=True),
+    help="Vendor-generated parametric map NIfTI (e.g. siemens_ADC.nii.gz).",
+)
+@click.option(
+    "--map-type",
+    required=True,
+    type=click.Choice(["adc", "t1", "t2"], case_sensitive=False),
+    help="Which map the vendor image is: adc (DWI space) or t1/t2 (native-contrast space).",
+)
+@click.option(
+    "--phantom",
+    default="",
+    help="Phantom name, e.g. SPIRIT (used for the report title only).",
+)
+@click.option(
+    "--output", "-o",
+    required=True,
+    help="Output HTML report path.",
+)
+def vendor_compare(
+    output_dir: str, vendor_image: str, map_type: str, phantom: str, output: str
+) -> None:
+    """Compare a vendor-provided ADC/T1/T2 map against phantomkit's own values, per vial."""
+    import tempfile
+
+    from phantomkit.pipeline import print_header
+    from phantomkit.vendor_compare import locate_reference, compute_vendor_vial_stats
+    from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
+
+    output_path = Path(output_dir)
+    map_type = map_type.lower()
+
+    print_header("Vendor Comparison")
+    print(f"  Output dir:    {output_path}")
+    print(f"  Vendor image:  {vendor_image}")
+    print(f"  Map type:      {map_type.upper()}")
+    print()
+
+    print("  Locating phantomkit's existing report and vial masks...")
+    ref = locate_reference(output_path, map_type)
+    print(f"    Report:      {ref['report_html']}")
+    print(f"    Vial masks:  {len(ref['vial_masks'])} found")
+
+    with tempfile.TemporaryDirectory(prefix="phantomkit_vendor_compare_") as tmp:
+        print("\n  Regridding vial masks onto the vendor image and computing stats...")
+        vendor_stats = compute_vendor_vial_stats(
+            Path(vendor_image), ref["vial_masks"], Path(tmp)
+        )
+        print(f"    Computed stats for {len(vendor_stats)} vials")
+
+        print("\n  Building comparison report...")
+        build_vendor_compare_html(
+            vendor_image=vendor_image,
+            vial_masks={k: str(v) for k, v in ref["vial_masks"].items()},
+            vendor_stats=vendor_stats,
+            reference_html=str(ref["report_html"]),
+            map_type=map_type,
+            output=output,
+            phantom=phantom,
+        )
+
+    print_header("Vendor Comparison Complete")
+    print(f"  Report written to: {output}\n")

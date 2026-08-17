@@ -142,6 +142,14 @@ class PlotReq(BaseModel):
     phantom:    str = ""
 
 
+class VendorCompareReq(BaseModel):
+    output_dir:   str
+    vendor_image: str
+    map_type:     str
+    phantom:      str = ""
+    output:       str
+
+
 # ── Run endpoints ─────────────────────────────────────────────────────────────
 
 @app.post("/api/run/pipeline")
@@ -215,6 +223,18 @@ async def run_longitudinal(r: PlotReq):
     for lbl in r.labels:
         if lbl:
             cmd += ["--label", lbl]
+    return StreamingResponse(_stream(cmd), media_type="text/event-stream")
+
+
+@app.post("/api/run/vendor-compare")
+async def run_vendor_compare(r: VendorCompareReq):
+    cmd = [sys.executable, "-m", "phantomkit", "vendor-compare",
+           "--output-dir",   r.output_dir,
+           "--vendor-image", r.vendor_image,
+           "--map-type",     r.map_type,
+           "-o",             r.output]
+    if r.phantom:
+        cmd += ["--phantom", r.phantom]
     return StreamingResponse(_stream(cmd), media_type="text/event-stream")
 
 
@@ -418,6 +438,7 @@ button { cursor: pointer; border: none; border-radius: 6px;
 <nav class="tabs">
   <button class="tab active" onclick="switchTab('pipeline', this)">Pipeline</button>
   <button class="tab"        onclick="switchTab('compare',  this)">Compare</button>
+  <button class="tab"        onclick="switchTab('vendor',   this)">Vendor Comparison</button>
 </nav>
 
 <!-- ══════════════════════════════════ PIPELINE ══════════════════════════════ -->
@@ -523,6 +544,61 @@ button { cursor: pointer; border: none; border-radius: 6px;
 
 </section>
 
+<!-- ═══════════════════════════════ VENDOR COMPARISON ═════════════════════════ -->
+<section id="tab-vendor" class="tab-content">
+
+  <div class="card">
+    <div class="card-title">Required</div>
+
+    <div class="field-row">
+      <label>Phantom</label>
+      <select id="v-phantom" style="max-width:200px"></select>
+    </div>
+
+    <div class="field-row">
+      <label>Pipeline output directory</label>
+      <div class="input-group">
+        <input type="text" id="v-output-dir" placeholder="/path/to/output/session">
+        <button class="btn-sm" onclick="openBrowser('v-output-dir','dir')">Browse…</button>
+      </div>
+    </div>
+
+    <div class="field-row">
+      <label>Map type</label>
+      <select id="v-map-type" style="max-width:200px">
+        <option value="adc">ADC (DWI space)</option>
+        <option value="t1">T1 (native contrast space)</option>
+        <option value="t2">T2 (native contrast space)</option>
+      </select>
+    </div>
+
+    <div class="field-row">
+      <label>Vendor image</label>
+      <div class="input-group">
+        <input type="text" id="v-vendor-image" placeholder="/path/to/siemens_ADC.nii.gz">
+        <button class="btn-sm" onclick="openBrowser('v-vendor-image','file')">Browse…</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Output</div>
+    <div class="field-row">
+      <label>Output HTML</label>
+      <div class="input-group">
+        <input type="text" id="v-output" placeholder="/path/to/vendor_compare.html">
+        <button class="btn-sm" onclick="openBrowser('v-output','save')">Save as…</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="run-row">
+    <button class="btn-primary" id="v-run-btn" onclick="runVendorCompare()">▶&nbsp;Run</button>
+  </div>
+  <div class="log" id="v-log"></div>
+
+</section>
+
 <!-- ══════════════════════════════════ FILE BROWSER ══════════════════════════ -->
 <div id="browser-overlay" class="overlay hidden" onclick="overlayClick(event)">
   <div class="browser-box">
@@ -551,7 +627,7 @@ const DWI_STEPS = __STEPS__;
 // ── Initialise selects and checkboxes ────────────────────────────────────────
 (function init() {
   // Phantom dropdowns
-  ['p-phantom','c-phantom'].forEach(function(id) {
+  ['p-phantom','c-phantom','v-phantom'].forEach(function(id) {
     var sel = document.getElementById(id);
     var opts = (id === 'p-phantom') ? PHANTOMS : ['(auto-detect)', ...PHANTOMS];
     opts.forEach(function(p) {
@@ -754,7 +830,7 @@ async function browseTo(path) {
 
     if (entry.is_dir) {
       div.onclick = function() { browseTo(entry.path); };
-    } else if (_brMode === 'html') {
+    } else if (_brMode === 'html' || _brMode === 'file') {
       div.onclick = function() { selectPath(entry.path); };
     }
     cont.appendChild(div);
@@ -950,6 +1026,28 @@ function runCompare() {
     phantom:    phantom === '(auto-detect)' ? '' : phantom,
   }, 'c-log', 'c-run-btn', function() {
     showHtmlButtons('c-log', [output]);
+  });
+}
+
+// ── Vendor Comparison ────────────────────────────────────────────────────────
+function runVendorCompare() {
+  var outputDir   = document.getElementById('v-output-dir').value.trim();
+  var vendorImage = document.getElementById('v-vendor-image').value.trim();
+  var mapType     = document.getElementById('v-map-type').value;
+  var phantom     = document.getElementById('v-phantom').value;
+  var output      = document.getElementById('v-output').value.trim();
+  if (!outputDir)   { alert('Select the pipeline output directory.'); return; }
+  if (!vendorImage) { alert('Select the vendor image.'); return; }
+  if (!output)      { alert('Choose an output HTML path.'); return; }
+
+  streamRun('/api/run/vendor-compare', {
+    output_dir:   outputDir,
+    vendor_image: vendorImage,
+    map_type:     mapType,
+    phantom:      phantom === '(auto-detect)' ? '' : phantom,
+    output:       output,
+  }, 'v-log', 'v-run-btn', function() {
+    showHtmlButtons('v-log', [output]);
   });
 }
 </script>

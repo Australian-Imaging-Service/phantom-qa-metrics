@@ -73,25 +73,30 @@ def _extract(
 
     metric_key is one of: "ADC", "FA", "Intensity", "T1", "T2".
     se_vals contains the curve-fit standard error of the fitted relaxation time
-    (T1_se_ms or T2_se_ms) for T1/T2 types; empty dict for ADC/FA/Intensity.
+    (T1_se_ms or T2_se_ms) for T1/T2 types, or the per-vial std for
+    vial_intensity types; empty dict only if no error info was embedded.
     """
     dtype = data.get("type", "")
+
+    def _scalar(m):
+        """Return a single float from a value that may be a list (multi-volume)."""
+        if isinstance(m, list):
+            valid = [x for x in m if x is not None]
+            return sum(valid) / len(valid) if valid else None
+        return float(m) if m is not None else None
 
     if dtype == "vial_intensity":
         vials = data.get("vials", [])
         means = data.get("means", [])
+        stds = data.get("stds")
         mode = data.get("contrast_mode", "generic")
         metric = {"adc": "ADC", "fa": "FA"}.get(mode, "Intensity")
 
-        def _scalar(m):
-            """Return a single float from a value that may be a list (multi-volume)."""
-            if isinstance(m, list):
-                valid = [x for x in m if x is not None]
-                return sum(valid) / len(valid) if valid else None
-            return float(m) if m is not None else None
-
         vals = {v.upper(): _scalar(m) for v, m in zip(vials, means)}
-        return metric, vials, vals, {}
+        se_vals = (
+            {v.upper(): _scalar(s) for v, s in zip(vials, stds)} if stds else {}
+        )
+        return metric, vials, vals, se_vals
 
     if dtype == "maps_ir":
         fit_results = data.get("fit_results", [])
