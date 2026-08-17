@@ -8,7 +8,10 @@ from pathlib import Path
 import click
 import pytest
 
-from phantomkit.vendor_compare import locate_reference, compute_vendor_vial_stats, ensure_nifti
+from phantomkit.vendor_compare import (
+    locate_reference, compute_vendor_vial_stats, ensure_nifti,
+    infer_adc_scale, load_full_stats_from_xlsx,
+)
 from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
 
 
@@ -337,10 +340,27 @@ def test_build_vendor_compare_html_omits_reference_when_unavailable(tmp_path: Pa
 # ── ensure_nifti ─────────────────────────────────────────────────────────────
 
 
-def test_ensure_nifti_passes_through_nifti_unchanged(tmp_path: Path) -> None:
+def test_ensure_nifti_normalizes_nifti_input(tmp_path: Path) -> None:
+    """Always runs through mrconvert now (dtype/strides normalization for
+    the viewer), even for already-NIfTI input — not a pure passthrough."""
+    if shutil.which("mrconvert") is None:
+        pytest.skip("mrconvert not available")
+
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    affine = numpy.eye(4)
     p = tmp_path / "image.nii.gz"
-    p.write_bytes(b"")
-    assert ensure_nifti(p, tmp_path / "tmp") == p
+    nibabel.save(
+        nibabel.Nifti1Image((numpy.random.rand(6, 6, 6) * 1000).astype("int16"), affine),
+        str(p),
+    )
+
+    normalized = ensure_nifti(p, tmp_path / "tmp")
+
+    assert normalized != p
+    assert normalized.name == "image_normalized.nii.gz"
+    assert normalized.exists()
 
 
 def test_ensure_nifti_converts_mif(tmp_path: Path) -> None:
@@ -362,5 +382,189 @@ def test_ensure_nifti_converts_mif(tmp_path: Path) -> None:
     converted = ensure_nifti(mif, tmp_path / "conv")
 
     assert converted != mif
-    assert converted.name == "vendor.nii.gz"
+    assert converted.name == "vendor_normalized.nii.gz"
     assert converted.exists()
+
+
+# ── infer_adc_scale ──────────────────────────────────────────────────────────
+
+
+def _stats_with_means(means):
+    return {str(i): {"mean": m} for i, m in enumerate(means)}
+
+
+def test_infer_adc_scale_raw_mm2_per_s() -> None:
+    assert infer_adc_scale(_stats_with_means([0.0007, 0.0009, 0.0011])) == 1e3
+
+
+def test_infer_adc_scale_already_scaled() -> None:
+    assert infer_adc_scale(_stats_with_means([0.7, 0.9, 1.1])) == 1.0
+
+
+def test_infer_adc_scale_integer_scaled() -> None:
+    assert infer_adc_scale(_stats_with_means([700, 900, 1100])) == 1e-3
+
+
+def test_infer_adc_scale_empty_defaults_to_1000() -> None:
+    assert infer_adc_scale({}) == 1e3
+
+
+# ── load_full_stats_from_xlsx ────────────────────────────────────────────────
+
+
+def test_load_full_stats_from_xlsx(tmp_path: Path) -> None:
+    pandas = pytest.importorskip("pandas")
+    openpyxl = pytest.importorskip("openpyxl")  # noqa: F841 -- required by ExcelWriter
+
+    xlsx_path = tmp_path / "ADC.xlsx"
+    with pandas.ExcelWriter(xlsx_path) as writer:
+        for sheet, vals in [
+            ("mean", [0.0007, 0.0009]),
+            ("median", [0.00068, 0.00088]),
+            ("std", [0.00002, 0.00003]),
+            ("count", [500, 480]),
+            ("p25", [0.00065, 0.00085]),
+            ("p75", [0.0007, 0.0009]),
+            ("min", [0.0005, 0.0007]),
+            ("max", [0.0009, 0.0011]),
+            ("mean_mad", [0.00002, 0.00003]),
+            ("median_mad", [0.00002, 0.00003]),
+        ]:
+            pandas.DataFrame({"vial": ["E", "F"], "vol0": vals}).to_excel(
+                writer, sheet_name=sheet, index=False
+            )
+
+    stats = load_full_stats_from_xlsx(xlsx_path)
+
+    assert set(stats) == {"E", "F"}
+    assert stats["E"]["mean"] == pytest.approx(0.0007)
+    assert stats["E"]["median"] == pytest.approx(0.00068)
+    assert stats["F"]["count"] == pytest.approx(480)
+
+
+# ── build_vendor_compare_html: full stats for both series (ADC) ─────────────
+
+
+def test_build_vendor_compare_html_both_series_have_mean_median_when_xlsx_given(
+    tmp_path: Path,
+) -> None:
+    pandas = pytest.importorskip("pandas")
+    pytest.importorskip("openpyxl")
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E"], '
+        '"means": [0.70], "stds": [0.02]}</script></body></html>'
+    )
+    xlsx_path = tmp_path / "ADC.xlsx"
+    with pandas.ExcelWriter(xlsx_path) as writer:
+        for sheet, val in [
+            ("mean", 0.0007), ("median", 0.00068), ("std", 0.00002), ("count", 500),
+            ("p25", 0.00065), ("p75", 0.0007), ("min", 0.0005), ("max", 0.0009),
+            ("mean_mad", 0.00002), ("median_mad", 0.00002),
+        ]:
+            pandas.DataFrame({"vial": ["E"], "vol0": [val]}).to_excel(
+                writer, sheet_name=sheet, index=False
+            )
+
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    vial_masks = {"E": str(tmp_path / "E.nii.gz")}
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), vial_masks["E"],
+    )
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_image=str(vendor_image),
+        vial_masks=vial_masks,
+        vendor_stats=_fake_vendor_stats(["E"]),
+        reference_html=str(ref_html),
+        reference_xlsx=str(xlsx_path),
+        map_type="adc",
+        output=str(output),
+        scale=1e3,
+    )
+
+    html = output.read_text()
+    m = re.search(r"const PK_DATA = (\{.*?\});", html, re.DOTALL)
+    pk_data = json.loads(m.group(1))
+    # Both rows now have distinct mean vs median (not collapsed to the same
+    # fixed point) — row 0 is phantomkit, row 1 is vendor.
+    assert pk_data["measure"]["mean"][0] != pk_data["measure"]["median"][0]
+    assert "Both series respond" in html
+
+
+def test_build_vendor_compare_html_pk_xlsx_scale_independent_of_vendor_scale(
+    tmp_path: Path,
+) -> None:
+    """phantomkit's own xlsx-derived series must always be scaled by its
+    fixed x1000 mm^2/s convention, never by the vendor image's own
+    (independently detected) scale -- regression test for a bug where both
+    series were scaled by the same `scale` value, corrupting phantomkit's
+    own numbers whenever the vendor's convention differed from x1000."""
+    pandas = pytest.importorskip("pandas")
+    pytest.importorskip("openpyxl")
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E"], '
+        '"means": [0.70], "stds": [0.02]}</script></body></html>'
+    )
+    xlsx_path = tmp_path / "ADC.xlsx"
+    with pandas.ExcelWriter(xlsx_path) as writer:
+        for sheet, val in [
+            ("mean", 0.0007), ("median", 0.00068), ("std", 0.00002), ("count", 500),
+            ("p25", 0.00065), ("p75", 0.0007), ("min", 0.0005), ("max", 0.0009),
+            ("mean_mad", 0.00002), ("median_mad", 0.00002),
+        ]:
+            pandas.DataFrame({"vial": ["E"], "vol0": [val]}).to_excel(
+                writer, sheet_name=sheet, index=False
+            )
+
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    vial_masks = {"E": str(tmp_path / "E.nii.gz")}
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), vial_masks["E"],
+    )
+
+    # Vendor's own detected scale is deliberately different from
+    # phantomkit's fixed x1000 xlsx convention (pk_xlsx_scale). If the two
+    # were ever conflated, phantomkit's row would come out scaled by this
+    # value instead (~0.0000007) rather than by the correct fixed x1000
+    # (~0.7).
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_image=str(vendor_image),
+        vial_masks=vial_masks,
+        vendor_stats=_fake_vendor_stats(["E"]),
+        reference_html=str(ref_html),
+        reference_xlsx=str(xlsx_path),
+        map_type="adc",
+        output=str(output),
+        scale=1e-3,
+    )
+
+    html = output.read_text()
+    m = re.search(r"const PK_DATA = (\{.*?\});", html, re.DOTALL)
+    pk_data = json.loads(m.group(1))
+
+    # Row 0 = phantomkit (xlsx mean 0.0007 x fixed pk_xlsx_scale 1e3 = 0.7),
+    # row 1 = vendor (fake stats mean 0.7 x vendor scale 1e-3 = 0.0007).
+    assert pk_data["measure"]["mean"][0][0] == pytest.approx(0.7, rel=1e-6)
+    assert pk_data["measure"]["mean"][1][0] == pytest.approx(0.0007, rel=1e-6)

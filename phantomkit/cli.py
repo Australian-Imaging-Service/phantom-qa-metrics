@@ -798,7 +798,7 @@ def vendor_compare(
 
     from phantomkit.pipeline import print_header
     from phantomkit.vendor_compare import (
-        locate_reference, compute_vendor_vial_stats, ensure_nifti,
+        locate_reference, compute_vendor_vial_stats, ensure_nifti, infer_adc_scale,
     )
     from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
 
@@ -815,11 +815,13 @@ def vendor_compare(
     ref = locate_reference(output_path, map_type)
     print(f"    Report:      {ref['report_html']}")
     print(f"    Vial masks:  {len(ref['vial_masks'])} found")
+    if ref.get("reference_xlsx"):
+        print(f"    Reference xlsx: {ref['reference_xlsx']} (full mean/median/CI available)")
 
     with tempfile.TemporaryDirectory(prefix="phantomkit_vendor_compare_") as tmp:
+        print("\n  Normalizing vendor image for the viewer (mrconvert)...")
         vendor_nifti = ensure_nifti(Path(vendor_image), Path(tmp))
-        if vendor_nifti != Path(vendor_image):
-            print(f"\n  Converted vendor image to NIfTI: {vendor_nifti.name}")
+        print(f"    {vendor_nifti.name}")
 
         print("\n  Regridding vial masks onto the vendor image and computing stats...")
         vendor_stats = compute_vendor_vial_stats(
@@ -827,16 +829,23 @@ def vendor_compare(
         )
         print(f"    Computed stats for {len(vendor_stats)} vials")
 
+        scale = infer_adc_scale(vendor_stats) if map_type == "adc" else 1.0
+        if map_type == "adc":
+            print(f"    Detected unit scale for vendor ADC values: x{scale:g} "
+                  f"(vs. phantomkit's own x10⁻³ mm²/s convention)")
+
         print("\n  Building comparison report...")
         build_vendor_compare_html(
             vendor_image=str(vendor_nifti),
             vial_masks={k: str(v) for k, v in ref["vial_masks"].items()},
             vendor_stats=vendor_stats,
             reference_html=str(ref["report_html"]),
+            reference_xlsx=str(ref["reference_xlsx"]) if ref.get("reference_xlsx") else None,
             template_dir=template_dir,
             map_type=map_type,
             output=output,
             phantom=phantom,
+            scale=scale,
         )
 
     print_header("Vendor Comparison Complete")

@@ -86,37 +86,132 @@ def locate_reference(output_dir: Path, map_type: str) -> dict:
     vial_masks = {
         p.name.replace(".nii.gz", ""): p for p in sorted(vial_seg_dir.glob("*.nii.gz"))
     }
-    return {"report_html": report_html, "vial_masks": vial_masks}
+
+    # ADC also has a per-vial xlsx (mean/median/std/count/p25/p75/min/max/
+    # mean_mad/median_mad sheets, written by phantom_processor.py's
+    # _task_extract_metrics) sitting alongside the report — reading it gives
+    # phantomkit's own series the same full distribution the freshly
+    # computed vendor stats have, instead of just a fixed mean+std. T1/T2
+    # only ever have a single curve-fit value (no such xlsx exists for
+    # them), so this is ADC-only.
+    reference_xlsx = None
+    if map_type == "adc":
+        xlsx_dir = report_html.parent.parent / "xlsx"
+        xlsx_candidates = sorted(xlsx_dir.glob("*ADC*.xlsx")) if xlsx_dir.is_dir() else []
+        if len(xlsx_candidates) == 1:
+            reference_xlsx = xlsx_candidates[0]
+
+    return {
+        "report_html": report_html,
+        "vial_masks": vial_masks,
+        "reference_xlsx": reference_xlsx,
+    }
 
 
 def ensure_nifti(image_path: Path, tmp_dir: Path) -> Path:
-    """Convert a MIF-format vendor image to NIfTI if needed.
+    """Normalize a vendor image into a well-behaved NIfTI for the viewer.
 
-    mrgrid/mrstats (used elsewhere in this module) handle MIF natively, but
-    the report's NiiVue viewer only understands NIfTI — it parses raw
-    NIfTI-1 header byte offsets directly (nifti_to_base64() in
-    _html_common.py), so handing it a MIF file (a completely different,
-    ASCII-header-based format) reads garbage there and can hang the browser
-    trying to render the result. Converting once upfront keeps stats
-    computation and the viewer consistent on the same file.
+    Always runs the image through mrconvert with an explicit float32
+    datatype and canonical strides — not just for MIF input — matching the
+    shape every image phantomkit's own pipeline already produces (all
+    mrtrix/ANTs outputs). Vendor-exported images can have quirks
+    phantomkit's own images never do: MRtrix's own MIF format entirely
+    (a completely different, ASCII-header-based layout), int16 storage
+    with scl_slope/intercept scaling, or unusual strides/axis ordering.
+    nifti_to_base64() (_html_common.py) only does a minimal float64->
+    float32 repack and otherwise passes the file's bytes straight through
+    to the browser's NiiVue viewer, so anything unusual in the source
+    file reaches it unchanged — which can hang trying to render it.
+    Converting once upfront also keeps stats computation and the viewer
+    consistent on the same file.
     """
     name = image_path.name
-    if not name.endswith((".mif", ".mif.gz")):
-        return image_path
-
     stem = name
-    for ext in (".mif.gz", ".mif"):
+    for ext in (".mif.gz", ".mif", ".nii.gz", ".nii"):
         if stem.endswith(ext):
             stem = stem[: -len(ext)]
             break
 
     tmp_dir.mkdir(parents=True, exist_ok=True)
-    out = tmp_dir / f"{stem}.nii.gz"
+    out = tmp_dir / f"{stem}_normalized.nii.gz"
     subprocess.run(
-        ["mrconvert", str(image_path), str(out), "-force"],
+        [
+            "mrconvert", str(image_path), str(out),
+            "-datatype", "float32", "-strides", "1,2,3", "-force",
+        ],
         check=True, capture_output=True,
     )
     return out
+
+
+def infer_adc_scale(vendor_stats: dict) -> float:
+    """Guess the multiplier needed to bring vendor ADC values in line with
+    phantomkit's own ×10⁻³ mm²/s display convention.
+
+    Vendor ADC maps appear in the wild in several different unit
+    conventions:
+      - raw mm²/s (~0.0003-0.003)                  -> ×1000
+      - already ×10⁻³ mm²/s (~0.3-3, matching
+        phantomkit's own display convention)        -> ×1
+      - integer-scaled, ~×10⁻⁶ (a common vendor/
+        DICOM storage convention, typically
+        hundreds to low thousands)                   -> ×0.001
+
+    This is a heuristic based on typical (median-of-means) magnitude —
+    there's no reliable header field to read the convention from
+    directly. The chosen scale is always reported in the CLI/GUI log so
+    it's never a silent guess.
+    """
+    means = sorted(
+        abs(s["mean"]) for s in vendor_stats.values() if s.get("mean") is not None
+    )
+    if not means:
+        return 1e3
+    typical = means[len(means) // 2]
+    if typical < 0.05:
+        return 1e3
+    if typical < 50:
+        return 1.0
+    return 1e-3
+
+
+def _read_xlsx_sheet_means(xlsx_path: Path, sheet: str) -> dict[str, float]:
+    """Read one xlsx sheet, averaging across vol0..N columns per vial."""
+    import pandas as pd
+
+    df = pd.read_excel(xlsx_path, sheet_name=sheet)
+    vol_cols = [c for c in df.columns if c != "vial"]
+    result = {}
+    for _, row in df.iterrows():
+        vals = [row[c] for c in vol_cols if pd.notna(row[c])]
+        if vals:
+            result[str(row["vial"]).upper()] = float(sum(vals) / len(vals))
+    return result
+
+
+def load_full_stats_from_xlsx(xlsx_path: Path) -> dict:
+    """Read phantomkit's own full per-vial distribution stats from its xlsx.
+
+    Returns ``{vial_upper: {mean, median, std, count, p25, p75, min, max,
+    mean_mad, median_mad}}`` — the same shape
+    :func:`phantomkit.pet_processing.extract_pet_vial_metrics` returns for
+    the vendor side, in the same raw (un-scaled) units.
+    """
+    fields = (
+        "mean", "median", "std", "count", "p25", "p75",
+        "min", "max", "mean_mad", "median_mad",
+    )
+    per_field = {}
+    for f in fields:
+        try:
+            per_field[f] = _read_xlsx_sheet_means(xlsx_path, f)
+        except Exception:
+            per_field[f] = {}
+
+    vials = set()
+    for d in per_field.values():
+        vials |= set(d)
+    return {v: {f: per_field[f].get(v) for f in fields} for v in vials}
 
 
 def compute_vendor_vial_stats(

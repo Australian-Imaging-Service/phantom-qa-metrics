@@ -6,13 +6,14 @@ Build the vendor-comparison HTML report: an interactive viewer (vendor image
 of phantomkit's own value against the vendor's, with Mean/Median and
 error-bar-variant toggles.
 
-phantomkit's own series has no mean/median distinction (ADC: a single
-displayed mean+std pulled from its own report, not a raw distribution; T1/T2:
-a single curve-fit value) so its point never moves under the Mean/Median
-toggle — only the freshly-computed vendor series does. The error-mode
-buttons (SD/SE/2SE/MAD/IQR/Min-Max) still apply consistently to both series,
-using phantomkit's own std/SE as the single spread value fed into the same
-formula the vendor side uses.
+For ADC, phantomkit's own series gets the SAME full mean/median/percentile
+distribution the freshly-computed vendor series does (read from
+phantom_processor.py's own per-vial xlsx, when available) — both series
+respond to the Mean/Median and error-bar toggle buttons. For T1/T2, there is
+no such distribution (a curve fit only produces one value per vial), so
+phantomkit's point stays at a single fixed value ± its curve-fit SE, fed
+into the same error-mode formula the vendor side uses, while the vendor
+series (which DOES have real per-voxel stats) still responds fully.
 
 Not registered as a CLI command — called directly by ``phantomkit
 vendor-compare`` (phantomkit/cli.py) after computation is complete, the same
@@ -52,6 +53,8 @@ def build_vendor_compare_html(
     output: str,
     phantom: str = "",
     template_dir: str | None = None,
+    reference_xlsx: str | None = None,
+    scale: float | None = None,
 ) -> None:
     """Build the self-contained vendor-comparison HTML report.
 
@@ -75,6 +78,22 @@ def build_vendor_compare_html(
         Path to ``template_data/`` for calibration reference lookup
         (auto-detected if omitted). If no reference is available for this
         phantom/metric, the reference series is simply omitted.
+    reference_xlsx:
+        For ADC only: path to phantomkit's own per-vial xlsx (as located by
+        :func:`phantomkit.vendor_compare.locate_reference`), giving
+        phantomkit's series the same full mean/median/percentile
+        distribution the vendor series has. Falls back to a fixed point ±
+        std (from reference_html) if omitted or unreadable.
+    scale:
+        Multiplier applied to the *vendor* series only, to bring it in
+        line with phantomkit's ×10⁻³ mm²/s display convention. Vendor ADC
+        maps show up in several different unit conventions in the wild
+        (see :func:`phantomkit.vendor_compare.infer_adc_scale`, used to
+        auto-detect this when not given). phantomkit's own xlsx-derived
+        stats (when reference_xlsx is given) always use a fixed ×1000 —
+        `_task_extract_metrics` always writes raw mrstats output
+        (mm²/s), a known, fixed convention independent of whatever the
+        vendor file happens to use. Unused (1.0) for T1/T2.
     """
     from phantomkit.plotting._html_common import (
         html_head,
@@ -88,10 +107,23 @@ def build_vendor_compare_html(
     )
     from phantomkit.plotting.compare_plots import _load_embedded, _extract, _auto_template_dir
     from phantomkit.plotting._calibration_reference import load_calibration_reference
+    from phantomkit.vendor_compare import infer_adc_scale, load_full_stats_from_xlsx
 
     metric, ref_vials_order, ref_vals, ref_se = _extract(_load_embedded(reference_html))
     y_label = _Y_LABELS.get(metric, metric)
-    scale = 1e3 if map_type == "adc" else 1.0
+    if scale is None:
+        scale = infer_adc_scale(vendor_stats) if map_type == "adc" else 1.0
+    # phantomkit's own xlsx is always raw mrstats output (mm²/s) — a fixed,
+    # known convention, independent of whichever convention the vendor
+    # file happens to use. Must NOT share `scale` (vendor-specific) above.
+    pk_xlsx_scale = 1e3 if map_type == "adc" else 1.0
+
+    pk_full_stats = None
+    if map_type == "adc" and reference_xlsx:
+        try:
+            pk_full_stats = load_full_stats_from_xlsx(Path(reference_xlsx))
+        except Exception:
+            pk_full_stats = None
 
     # Common vial axis: vials present in both phantomkit's reference and the
     # freshly-computed vendor stats (matched case-insensitively).
@@ -124,8 +156,12 @@ def build_vendor_compare_html(
             if val is not None:
                 ref_pts.append({"x": j, "y": round(val, 4)})
 
-    # Row 0 = phantomkit (fixed point ± one spread value), row 1 = vendor
-    # (full mean/median/percentile distribution from fresh voxel stats).
+    # Row 0 = phantomkit, row 1 = vendor. Both get the full
+    # mean/median/percentile treatment when real distribution data is
+    # available (always true for vendor; true for phantomkit only when
+    # reference_xlsx was found for ADC) — otherwise a row falls back to a
+    # single fixed point ± one spread value, replicated across every
+    # error-mode variant.
     mean_m       = np.zeros((2, n))
     median_m     = np.zeros((2, n))
     std_m        = np.zeros((2, n))
@@ -137,28 +173,55 @@ def build_vendor_compare_html(
     mean_mad_m   = np.zeros((2, n))
     median_mad_m = np.zeros((2, n))
 
+    def _fill_row(row: int, j: int, s: dict, row_scale: float) -> None:
+        mean = s.get("mean")
+        mean = mean if mean is not None else 0.0
+        median = s.get("median")
+        median = median if median is not None else mean
+        std = s.get("std") or 0.0
+        count = s.get("count") or 1.0
+        p25 = s.get("p25")
+        p25 = p25 if p25 is not None else mean - std
+        p75 = s.get("p75")
+        p75 = p75 if p75 is not None else mean + std
+        vmin = s.get("min")
+        vmin = vmin if vmin is not None else mean - std
+        vmax = s.get("max")
+        vmax = vmax if vmax is not None else mean + std
+        mean_mad = s.get("mean_mad")
+        mean_mad = mean_mad if mean_mad is not None else std
+        median_mad = s.get("median_mad")
+        median_mad = median_mad if median_mad is not None else std
+
+        mean_m[row, j]       = mean * row_scale
+        median_m[row, j]     = median * row_scale
+        std_m[row, j]        = std * row_scale
+        count_m[row, j]      = max(count, 1.0)
+        p25_m[row, j]        = p25 * row_scale
+        p75_m[row, j]        = p75 * row_scale
+        min_m[row, j]        = vmin * row_scale
+        max_m[row, j]        = vmax * row_scale
+        mean_mad_m[row, j]   = mean_mad * row_scale
+        median_mad_m[row, j] = median_mad * row_scale
+
+    has_full_pk_stats = False
     for j, v in enumerate(vials):
         vu = v.upper()
 
-        pk_val = ref_vals[vu]
-        pk_width = ref_se.get(vu) or 0.0
-        mean_m[0, j] = median_m[0, j] = pk_val
-        std_m[0, j] = pk_width
-        p25_m[0, j], p75_m[0, j] = pk_val - pk_width, pk_val + pk_width
-        min_m[0, j], max_m[0, j] = pk_val - pk_width, pk_val + pk_width
-        mean_mad_m[0, j] = median_mad_m[0, j] = pk_width
+        pk_full = pk_full_stats.get(vu) if pk_full_stats else None
+        if pk_full and pk_full.get("mean") is not None:
+            # Raw (un-scaled) xlsx stats — always phantomkit's own fixed
+            # ×1000 convention, NOT the vendor's auto-detected scale.
+            _fill_row(0, j, pk_full, pk_xlsx_scale)
+            has_full_pk_stats = True
+        else:
+            # Fallback: a single fixed value ± spread, already in
+            # phantomkit's display-scaled units (no further scaling).
+            pk_val = ref_vals[vu]
+            pk_width = ref_se.get(vu) or 0.0
+            _fill_row(0, j, {"mean": pk_val, "std": pk_width}, 1.0)
 
-        s = vendor_stats[vendor_by_upper[vu]]
-        mean_m[1, j]   = s["mean"] * scale
-        median_m[1, j] = s["median"] * scale
-        std_m[1, j]    = s["std"] * scale
-        count_m[1, j]  = max(s["count"], 1.0)
-        p25_m[1, j]    = s["p25"] * scale
-        p75_m[1, j]    = s["p75"] * scale
-        min_m[1, j]    = s["min"] * scale
-        max_m[1, j]    = s["max"] * scale
-        mean_mad_m[1, j]   = (s["mean_mad"] or 0.0) * scale
-        median_mad_m[1, j] = (s["median_mad"] or 0.0) * scale
+        _fill_row(1, j, vendor_stats[vendor_by_upper[vu]], scale)
 
     err_bounds = _compute_pk_err_bounds(
         mean_m, median_m, std_m, count_m, p25_m, p75_m, min_m, max_m,
@@ -237,6 +300,18 @@ def build_vendor_compare_html(
         "vendor": {v: vendor_stats[vendor_by_upper[v.upper()]] for v in vials},
     }
 
+    if has_full_pk_stats:
+        footnote = (
+            "Both series respond to the Mean/Median and error-bar toggles — "
+            "phantomkit's own per-vial voxel distribution, from its own xlsx."
+        )
+    else:
+        footnote = (
+            "phantomkit's own value has a single fixed spread (no per-vial "
+            "voxel distribution available for this map type); only the "
+            "Vendor series moves with the Mean/Median toggle."
+        )
+
     datasets_json = json.dumps(datasets)
     vials_json = json.dumps(vials)
     pk_data_json = json.dumps(pk_data)
@@ -258,9 +333,7 @@ def build_vendor_compare_html(
   <div class="chart-title">{title}</div>
   <div class="chart-wrap" style="height:420px"><canvas id="vendorCompareChart"></canvas></div>
   <p style="font-size:13px;color:var(--text2);margin-top:8px;">
-    phantomkit's own value has a single fixed spread (no per-vial voxel
-    distribution to select mean/median from); only the Vendor series moves
-    with the Mean/Median toggle.
+    {footnote}
   </p>
 </div>
 
