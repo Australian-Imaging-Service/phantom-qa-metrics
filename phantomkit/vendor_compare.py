@@ -89,6 +89,36 @@ def locate_reference(output_dir: Path, map_type: str) -> dict:
     return {"report_html": report_html, "vial_masks": vial_masks}
 
 
+def ensure_nifti(image_path: Path, tmp_dir: Path) -> Path:
+    """Convert a MIF-format vendor image to NIfTI if needed.
+
+    mrgrid/mrstats (used elsewhere in this module) handle MIF natively, but
+    the report's NiiVue viewer only understands NIfTI — it parses raw
+    NIfTI-1 header byte offsets directly (nifti_to_base64() in
+    _html_common.py), so handing it a MIF file (a completely different,
+    ASCII-header-based format) reads garbage there and can hang the browser
+    trying to render the result. Converting once upfront keeps stats
+    computation and the viewer consistent on the same file.
+    """
+    name = image_path.name
+    if not name.endswith((".mif", ".mif.gz")):
+        return image_path
+
+    stem = name
+    for ext in (".mif.gz", ".mif"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    out = tmp_dir / f"{stem}.nii.gz"
+    subprocess.run(
+        ["mrconvert", str(image_path), str(out), "-force"],
+        check=True, capture_output=True,
+    )
+    return out
+
+
 def compute_vendor_vial_stats(
     vendor_image: Path, vial_masks: dict[str, Path], tmp_dir: Path
 ) -> dict:

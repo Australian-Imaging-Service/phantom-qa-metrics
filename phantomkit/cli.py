@@ -775,7 +775,14 @@ def run_pipeline(
 @click.option(
     "--phantom",
     default="",
-    help="Phantom name, e.g. SPIRIT (used for the report title only).",
+    help="Phantom name, e.g. SPIRIT. Used for the report title and to look up "
+         "calibration reference values.",
+)
+@click.option(
+    "--template-dir",
+    default=None,
+    metavar="DIR",
+    help="Path to template_data/ directory (auto-detected if omitted).",
 )
 @click.option(
     "--output", "-o",
@@ -783,13 +790,16 @@ def run_pipeline(
     help="Output HTML report path.",
 )
 def vendor_compare(
-    output_dir: str, vendor_image: str, map_type: str, phantom: str, output: str
+    output_dir: str, vendor_image: str, map_type: str, phantom: str,
+    template_dir: str | None, output: str,
 ) -> None:
     """Compare a vendor-provided ADC/T1/T2 map against phantomkit's own values, per vial."""
     import tempfile
 
     from phantomkit.pipeline import print_header
-    from phantomkit.vendor_compare import locate_reference, compute_vendor_vial_stats
+    from phantomkit.vendor_compare import (
+        locate_reference, compute_vendor_vial_stats, ensure_nifti,
+    )
     from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
 
     output_path = Path(output_dir)
@@ -807,18 +817,23 @@ def vendor_compare(
     print(f"    Vial masks:  {len(ref['vial_masks'])} found")
 
     with tempfile.TemporaryDirectory(prefix="phantomkit_vendor_compare_") as tmp:
+        vendor_nifti = ensure_nifti(Path(vendor_image), Path(tmp))
+        if vendor_nifti != Path(vendor_image):
+            print(f"\n  Converted vendor image to NIfTI: {vendor_nifti.name}")
+
         print("\n  Regridding vial masks onto the vendor image and computing stats...")
         vendor_stats = compute_vendor_vial_stats(
-            Path(vendor_image), ref["vial_masks"], Path(tmp)
+            vendor_nifti, ref["vial_masks"], Path(tmp)
         )
         print(f"    Computed stats for {len(vendor_stats)} vials")
 
         print("\n  Building comparison report...")
         build_vendor_compare_html(
-            vendor_image=vendor_image,
+            vendor_image=str(vendor_nifti),
             vial_masks={k: str(v) for k, v in ref["vial_masks"].items()},
             vendor_stats=vendor_stats,
             reference_html=str(ref["report_html"]),
+            template_dir=template_dir,
             map_type=map_type,
             output=output,
             phantom=phantom,

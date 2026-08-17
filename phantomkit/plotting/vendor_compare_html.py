@@ -34,8 +34,13 @@ _Y_LABELS = {
     "Intensity": "Intensity",
 }
 
+# Colors follow the app-wide convention: red is reserved for the
+# calibration-config reference value (compare_plots._REFERENCE_COLOR,
+# vial_intensity.py's "Reference ADC"), so the freshly-computed vendor
+# series uses yellow instead to avoid colliding with that meaning.
 _PHANTOMKIT_COLOR = "#378ADD"
-_VENDOR_COLOR = "#C62828"
+_VENDOR_COLOR = "#E6B800"
+_REFERENCE_COLOR = "#C62828"
 
 
 def build_vendor_compare_html(
@@ -46,6 +51,7 @@ def build_vendor_compare_html(
     map_type: str,
     output: str,
     phantom: str = "",
+    template_dir: str | None = None,
 ) -> None:
     """Build the self-contained vendor-comparison HTML report.
 
@@ -65,6 +71,10 @@ def build_vendor_compare_html(
         Path to phantomkit's own existing report for this session/map-type.
     map_type:
         ``"adc"`` | ``"t1"`` | ``"t2"``.
+    template_dir:
+        Path to ``template_data/`` for calibration reference lookup
+        (auto-detected if omitted). If no reference is available for this
+        phantom/metric, the reference series is simply omitted.
     """
     from phantomkit.plotting._html_common import (
         html_head,
@@ -76,7 +86,8 @@ def build_vendor_compare_html(
         phantomkit_data_tag,
         _niivue_viewer_panel,
     )
-    from phantomkit.plotting.compare_plots import _load_embedded, _extract
+    from phantomkit.plotting.compare_plots import _load_embedded, _extract, _auto_template_dir
+    from phantomkit.plotting._calibration_reference import load_calibration_reference
 
     metric, ref_vials_order, ref_vals, ref_se = _extract(_load_embedded(reference_html))
     y_label = _Y_LABELS.get(metric, metric)
@@ -95,6 +106,23 @@ def build_vendor_compare_html(
             f"({reference_html}) and the vendor image's vial masks."
         )
     n = len(vials)
+
+    # Calibration-config reference values (the same "Reference" series shown
+    # in vial_intensity.py/compare_plots.py) — omitted gracefully if no
+    # calibration xlsx is available for this phantom/metric.
+    resolved_template_dir = template_dir or _auto_template_dir()
+    ref_config = (
+        load_calibration_reference(resolved_template_dir, phantom, metric)
+        if resolved_template_dir and phantom else None
+    )
+    ref_pts = []
+    if ref_config is not None:
+        default_temp = ref_config.get("default_temp")
+        temp_vals = ref_config.get("values_by_temp", {}).get(default_temp, {})
+        for j, v in enumerate(vials):
+            val = temp_vals.get(v.upper())
+            if val is not None:
+                ref_pts.append({"x": j, "y": round(val, 4)})
 
     # Row 0 = phantomkit (fixed point ± one spread value), row 1 = vendor
     # (full mean/median/percentile distribution from fresh voxel stats).
@@ -170,10 +198,34 @@ def build_vendor_compare_html(
         _dataset(0, "phantomkit", _PHANTOMKIT_COLOR, filled=True),
         _dataset(1, "Vendor", _VENDOR_COLOR, filled=False),
     ]
+    if ref_pts:
+        # Static overlay, not part of the _row/PK_DATA measure system — the
+        # calibration reference has no mean/median or spread concept at all,
+        # matching how vial_intensity.py's own "Reference ADC" is rendered.
+        datasets.append({
+            "label": "Reference",
+            "data": ref_pts,
+            "borderColor": "transparent",
+            "backgroundColor": "transparent",
+            "pointBackgroundColor": "transparent",
+            "pointBorderColor": _REFERENCE_COLOR,
+            "pointBorderWidth": 2,
+            "pointRadius": 8,
+            "pointStyle": "circle",
+            "borderWidth": 0,
+            "showLine": False,
+        })
 
-    viewer_html, viewer_js = _niivue_viewer_panel(
-        vendor_image, {k: str(v) for k, v in vial_masks.items()}
-    )
+    # Only load/overlay the vials actually being compared — not every mask
+    # in vial_segmentations/ (which may include vials irrelevant to this
+    # map type), to keep the viewer's per-vial toggle list meaningful and
+    # avoid loading more volumes than necessary.
+    vial_masks_by_upper = {k.upper(): v for k, v in vial_masks.items()}
+    viewer_vial_masks = {
+        v: str(vial_masks_by_upper[v.upper()])
+        for v in vials if v.upper() in vial_masks_by_upper
+    }
+    viewer_html, viewer_js = _niivue_viewer_panel(vendor_image, viewer_vial_masks)
 
     title = f"{phantom + ' — ' if phantom else ''}Vendor vs phantomkit: {metric} per vial"
     embedded = {

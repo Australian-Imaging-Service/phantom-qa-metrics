@@ -1,13 +1,14 @@
 """Unit tests for phantomkit.vendor_compare and phantomkit.plotting.vendor_compare_html."""
 
 import json
+import re
 import shutil
 from pathlib import Path
 
 import click
 import pytest
 
-from phantomkit.vendor_compare import locate_reference, compute_vendor_vial_stats
+from phantomkit.vendor_compare import locate_reference, compute_vendor_vial_stats, ensure_nifti
 from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
 
 
@@ -195,3 +196,171 @@ def test_build_vendor_compare_html_no_common_vials_raises(tmp_path: Path) -> Non
             map_type="adc",
             output=str(tmp_path / "out.html"),
         )
+
+
+def test_build_vendor_compare_html_only_shows_plotted_vials_in_viewer(
+    tmp_path: Path,
+) -> None:
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E"], '
+        '"means": [0.70], "stds": [0.02]}</script></body></html>'
+    )
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    # vial_masks includes "A", which isn't in the ADC comparison set — it
+    # should never reach the viewer's toggle chips.
+    vial_masks = {}
+    for vial in ("E", "A"):
+        p = tmp_path / f"{vial}.nii.gz"
+        nibabel.save(
+            nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), str(p)
+        )
+        vial_masks[vial] = str(p)
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_image=str(vendor_image),
+        vial_masks=vial_masks,
+        vendor_stats=_fake_vendor_stats(["E"]),
+        reference_html=str(ref_html),
+        map_type="adc",
+        output=str(output),
+    )
+
+    html = output.read_text()
+    chips = re.findall(r'pk-chip-\d+[^>]*>([A-Z])<', html)
+    assert chips == ["E"]
+
+
+def test_build_vendor_compare_html_includes_calibration_reference(tmp_path: Path) -> None:
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    vials = ["E", "F", "G", "H", "I", "J", "K", "L"]
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        + json.dumps({
+            "type": "vial_intensity", "contrast_mode": "adc", "vials": vials,
+            "means": [1.85, 1.61, 1.38, 1.19, 1.01, 0.86, 0.56, 0.30],
+            "stds": [0.03] * 8,
+        })
+        + "</script></body></html>"
+    )
+
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    vial_masks = {}
+    for vial in vials:
+        p = tmp_path / f"{vial}.nii.gz"
+        nibabel.save(
+            nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), str(p)
+        )
+        vial_masks[vial] = str(p)
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_image=str(vendor_image),
+        vial_masks=vial_masks,
+        vendor_stats=_fake_vendor_stats(vials),
+        reference_html=str(ref_html),
+        map_type="adc",
+        output=str(output),
+        phantom="SPIRIT",
+        template_dir="template_data",
+    )
+
+    html = output.read_text()
+    m = re.search(r"const DATASETS = (\[.*?\]);\s*const PK_DATA", html, re.DOTALL)
+    datasets = json.loads(m.group(1))
+    labels = [d["label"] for d in datasets]
+    assert labels == ["phantomkit", "Vendor", "Reference"]
+
+    by_label = {d["label"]: d for d in datasets}
+    assert by_label["phantomkit"]["borderColor"] == "#378ADD"
+    assert by_label["Vendor"]["borderColor"] == "#E6B800"
+    assert by_label["Reference"]["pointBorderColor"] == "#C62828"
+
+
+def test_build_vendor_compare_html_omits_reference_when_unavailable(tmp_path: Path) -> None:
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E"], '
+        '"means": [0.70], "stds": [0.02]}</script></body></html>'
+    )
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    vial_masks = {"E": str(tmp_path / "E.nii.gz")}
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine),
+        vial_masks["E"],
+    )
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_image=str(vendor_image),
+        vial_masks=vial_masks,
+        vendor_stats=_fake_vendor_stats(["E"]),
+        reference_html=str(ref_html),
+        map_type="adc",
+        output=str(output),
+        # no phantom / template_dir given -> no calibration reference
+    )
+
+    html = output.read_text()
+    m = re.search(r"const DATASETS = (\[.*?\]);\s*const PK_DATA", html, re.DOTALL)
+    datasets = json.loads(m.group(1))
+    assert [d["label"] for d in datasets] == ["phantomkit", "Vendor"]
+
+
+# ── ensure_nifti ─────────────────────────────────────────────────────────────
+
+
+def test_ensure_nifti_passes_through_nifti_unchanged(tmp_path: Path) -> None:
+    p = tmp_path / "image.nii.gz"
+    p.write_bytes(b"")
+    assert ensure_nifti(p, tmp_path / "tmp") == p
+
+
+def test_ensure_nifti_converts_mif(tmp_path: Path) -> None:
+    if shutil.which("mrconvert") is None:
+        pytest.skip("mrconvert not available")
+
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+    import subprocess
+
+    affine = numpy.eye(4)
+    nii = tmp_path / "fake.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine), str(nii)
+    )
+    mif = tmp_path / "vendor.mif.gz"
+    subprocess.run(["mrconvert", str(nii), str(mif), "-force"], check=True, capture_output=True)
+
+    converted = ensure_nifti(mif, tmp_path / "conv")
+
+    assert converted != mif
+    assert converted.name == "vendor.nii.gz"
+    assert converted.exists()
