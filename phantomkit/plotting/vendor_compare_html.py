@@ -149,9 +149,19 @@ def build_vendor_compare_html(
     )
     ref_pts = []
     ref_value_by_vial: dict[str, float] = {}
+    ref_by_temp: dict[str, list] = {}
+    temperatures: list = []
+    default_temp = None
     if ref_config is not None:
         default_temp = ref_config.get("default_temp")
-        temp_vals = ref_config.get("values_by_temp", {}).get(default_temp, {})
+        temperatures = ref_config.get("temperatures", [])
+        values_by_temp = ref_config.get("values_by_temp", {})
+        for temp_key, temp_map in values_by_temp.items():
+            ref_by_temp[str(temp_key)] = [
+                round(temp_map[v.upper()], 4) if temp_map.get(v.upper()) is not None else None
+                for v in vials
+            ]
+        temp_vals = values_by_temp.get(default_temp, {})
         for j, v in enumerate(vials):
             val = temp_vals.get(v.upper())
             if val is not None:
@@ -351,6 +361,22 @@ def build_vendor_compare_html(
             f'</tr>\n'
         )
 
+    if temperatures:
+        temp_options = "".join(
+            f'<option value="{t}"{" selected" if str(t) == str(default_temp) else ""}>{t} °C</option>'
+            for t in temperatures
+        )
+        temp_selector_html = (
+            '<div style="display:flex;align-items:center;gap:10px;margin:0 0 10px;">'
+            '<span style="font-size:13px;color:var(--text2);">Reference temperature:</span>'
+            '<select id="vcTempSelect" onchange="_vcSetTemp(this.value)"'
+            ' style="background:var(--bg3);color:var(--text);border:1px solid var(--border);'
+            'border-radius:6px;padding:4px 10px;font-size:13px;cursor:pointer;">'
+            f'{temp_options}</select></div>'
+        )
+    else:
+        temp_selector_html = ""
+
     table_html = f"""<div class="stats-section">
   <div class="stats-title">Per-vial comparison vs reference</div>
   <table class="stats-table">
@@ -361,11 +387,12 @@ def build_vendor_compare_html(
 {table_rows}    </tbody>
   </table>
   <p style="font-size:11px;color:var(--text2);margin-top:8px;">
-    &Delta; columns are percentage difference from the reference value. Table follows the Mean/Median toggle above.
+    &Delta; columns are percentage difference from the reference value. Table follows the Mean/Median toggle and reference temperature above.
   </p>
 </div>"""
 
-    ref_values_json = json.dumps([ref_value_by_vial.get(v) for v in vials])
+    ref_by_temp_json = json.dumps(ref_by_temp)
+    default_temp_json = json.dumps(default_temp)
 
     datasets_json = json.dumps(datasets)
     vials_json = json.dumps(vials)
@@ -386,6 +413,7 @@ def build_vendor_compare_html(
 
 <div class="chart-card">
   <div class="chart-title">{title}</div>
+  {temp_selector_html}
   <div class="chart-wrap" style="height:420px"><canvas id="vendorCompareChart"></canvas></div>
   <p style="font-size:13px;color:var(--text2);margin-top:8px;">
     {footnote}
@@ -400,12 +428,14 @@ def build_vendor_compare_html(
 const VIALS = {vials_json};
 const DATASETS = {datasets_json};
 const PK_DATA = {pk_data_json};
-const VC_REF_VALUES = {ref_values_json};
+const VC_REF_BY_TEMP = {ref_by_temp_json};
+let _vcCurrentTemp = {default_temp_json};
 
 {ERROR_BAR_PLUGIN_JS}
 {PK_TOGGLE_JS}
 {opts_js}
 
+function _vcRefValues() {{ return VC_REF_BY_TEMP[_vcCurrentTemp] || []; }}
 function _vcFmt(v) {{ return (v === null || v === undefined) ? "—" : String(Number(v.toPrecision(4))); }}
 function _vcFmtPct(v, ref) {{
   if (v === null || v === undefined || ref === null || ref === undefined || ref === 0) return "—";
@@ -414,14 +444,17 @@ function _vcFmtPct(v, ref) {{
 }}
 function _vcUpdateTable() {{
   const m = window._pkMeasure;
+  const refVals = _vcRefValues();
   VIALS.forEach((v, j) => {{
     const pk = PK_DATA.measure[m][0][j];
     const vendor = PK_DATA.measure[m][1][j];
-    const ref = VC_REF_VALUES[j];
+    const ref = refVals[j];
+    const refEl = document.getElementById("vc-ref-" + j);
     const pkEl = document.getElementById("vc-pk-" + j);
     const vendorEl = document.getElementById("vc-vendor-" + j);
     const pctPkEl = document.getElementById("vc-pct-pk-" + j);
     const pctVendorEl = document.getElementById("vc-pct-vendor-" + j);
+    if (refEl) refEl.textContent = _vcFmt(ref);
     if (pkEl) pkEl.textContent = _vcFmt(pk);
     if (vendorEl) vendorEl.textContent = _vcFmt(vendor);
     if (pctPkEl) pctPkEl.textContent = _vcFmtPct(pk, ref);
@@ -429,6 +462,19 @@ function _vcUpdateTable() {{
   }});
 }}
 window._pkAfterUpdate = _vcUpdateTable;
+
+function _vcSetTemp(temp) {{
+  _vcCurrentTemp = temp;
+  const refDs = chart.data.datasets.find(d => d.label === "Reference");
+  if (refDs) {{
+    const vals = _vcRefValues();
+    refDs.data = VIALS
+      .map((v, j) => ({{ x: j, y: vals[j] }}))
+      .filter(p => p.y !== null && p.y !== undefined);
+    chart.update("none");
+  }}
+  _vcUpdateTable();
+}}
 
 const opts = baseOpts("Vial", {y_label_json});
 opts.scales.x.type = "linear";

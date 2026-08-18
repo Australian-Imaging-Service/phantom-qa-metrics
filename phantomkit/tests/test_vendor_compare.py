@@ -297,6 +297,18 @@ def test_build_vendor_compare_html_includes_calibration_reference(tmp_path: Path
     assert by_label["Vendor"]["borderColor"] == "#E6B800"
     assert by_label["Reference"]["pointBorderColor"] == "#C62828"
 
+    # Temperature dropdown: multiple options, driving both the chart's
+    # Reference series and the table via VC_REF_BY_TEMP / _vcSetTemp.
+    assert '<select id="vcTempSelect"' in html
+    assert html.count("<option value=") > 1
+    ref_by_temp_m = re.search(r"const VC_REF_BY_TEMP = (\{.*?\});", html)
+    ref_by_temp = json.loads(ref_by_temp_m.group(1))
+    assert len(ref_by_temp) > 1
+    assert all(len(v) == len(vials) for v in ref_by_temp.values())
+
+    # Table's Reference column is seeded from the default temperature.
+    assert 'id="vc-ref-0"' in html and 'id="vc-ref-1"' in html
+
 
 def test_build_vendor_compare_html_omits_reference_when_unavailable(tmp_path: Path) -> None:
     numpy = pytest.importorskip("numpy")
@@ -335,6 +347,7 @@ def test_build_vendor_compare_html_omits_reference_when_unavailable(tmp_path: Pa
     m = re.search(r"const DATASETS = (\[.*?\]);\s*const PK_DATA", html, re.DOTALL)
     datasets = json.loads(m.group(1))
     assert [d["label"] for d in datasets] == ["phantomkit", "Vendor"]
+    assert '<select id="vcTempSelect"' not in html
 
 
 # ── ensure_nifti ─────────────────────────────────────────────────────────────
