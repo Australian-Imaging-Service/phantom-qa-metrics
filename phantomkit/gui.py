@@ -626,11 +626,10 @@ const DWI_STEPS = __STEPS__;
 
 // ── Initialise selects and checkboxes ────────────────────────────────────────
 (function init() {
-  // Phantom dropdowns
+  // Phantom dropdowns — always an explicit phantom, never auto-detected
   ['p-phantom','c-phantom','v-phantom'].forEach(function(id) {
     var sel = document.getElementById(id);
-    var opts = (id === 'p-phantom') ? PHANTOMS : ['(auto-detect)', ...PHANTOMS];
-    opts.forEach(function(p) {
+    PHANTOMS.forEach(function(p) {
       var o = document.createElement('option');
       o.value = o.textContent = p;
       sel.appendChild(o);
@@ -1023,7 +1022,7 @@ function runCompare() {
     html_files: rows.files,
     labels:     rows.labels,
     output:     output,
-    phantom:    phantom === '(auto-detect)' ? '' : phantom,
+    phantom:    phantom,
   }, 'c-log', 'c-run-btn', function() {
     showHtmlButtons('c-log', [output]);
   });
@@ -1044,7 +1043,7 @@ function runVendorCompare() {
     output_dir:   outputDir,
     vendor_image: vendorImage,
     map_type:     mapType,
-    phantom:      phantom === '(auto-detect)' ? '' : phantom,
+    phantom:      phantom,
     output:       output,
   }, 'v-log', 'v-run-btn', function() {
     showHtmlButtons('v-log', [output]);
