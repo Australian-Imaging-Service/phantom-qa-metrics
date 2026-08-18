@@ -52,6 +52,19 @@ def test_locate_reference_adc(tmp_path: Path) -> None:
 
     assert result["report_html"].name == "ADC.html"
     assert "E" in result["vial_masks"]
+    # No ADC.nii.gz written alongside vial_segmentations/ in this fixture.
+    assert result["phantomkit_image"] is None
+
+
+def test_locate_reference_adc_finds_phantomkit_image_when_present(tmp_path: Path) -> None:
+    output_dir = tmp_path / "output"
+    series_dir = output_dir / "DWI_series"
+    _write_adc_report(series_dir)
+    (series_dir / "ADC.nii.gz").write_bytes(b"")
+
+    result = locate_reference(output_dir, "adc")
+
+    assert result["phantomkit_image"] == series_dir / "ADC.nii.gz"
 
 
 def test_locate_reference_t1(tmp_path: Path) -> None:
@@ -62,6 +75,8 @@ def test_locate_reference_t1(tmp_path: Path) -> None:
 
     assert result["report_html"].name == "sess_T1_mapping.html"
     assert "E" in result["vial_masks"]
+    # T1/T2 never have a per-voxel map image (only per-vial curve-fit CSVs).
+    assert result["phantomkit_image"] is None
 
 
 def test_locate_reference_unknown_map_type(tmp_path: Path) -> None:
@@ -156,9 +171,10 @@ def test_build_vendor_compare_html(tmp_path: Path) -> None:
 
     output = tmp_path / "report.html"
     build_vendor_compare_html(
-        vendor_image=str(vendor_image),
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
         vial_masks=vial_masks,
-        vendor_stats=_fake_vendor_stats(["E", "F"]),
+        vendor_stats_list=[_fake_vendor_stats(["E", "F"])],
         reference_html=str(ref_html),
         map_type="adc",
         output=str(output),
@@ -192,9 +208,10 @@ def test_build_vendor_compare_html_no_common_vials_raises(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="No vials in common"):
         build_vendor_compare_html(
-            vendor_image=str(vendor_image),
+            vendor_images=[str(vendor_image)],
+            vendor_labels=["Vendor"],
             vial_masks={},
-            vendor_stats=_fake_vendor_stats(["Z"]),  # no overlap with "E"
+            vendor_stats_list=[_fake_vendor_stats(["Z"])],  # no overlap with "E"
             reference_html=str(ref_html),
             map_type="adc",
             output=str(tmp_path / "out.html"),
@@ -231,9 +248,10 @@ def test_build_vendor_compare_html_only_shows_plotted_vials_in_viewer(
 
     output = tmp_path / "report.html"
     build_vendor_compare_html(
-        vendor_image=str(vendor_image),
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
         vial_masks=vial_masks,
-        vendor_stats=_fake_vendor_stats(["E"]),
+        vendor_stats_list=[_fake_vendor_stats(["E"])],
         reference_html=str(ref_html),
         map_type="adc",
         output=str(output),
@@ -276,9 +294,10 @@ def test_build_vendor_compare_html_includes_calibration_reference(tmp_path: Path
 
     output = tmp_path / "report.html"
     build_vendor_compare_html(
-        vendor_image=str(vendor_image),
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
         vial_masks=vial_masks,
-        vendor_stats=_fake_vendor_stats(vials),
+        vendor_stats_list=[_fake_vendor_stats(vials)],
         reference_html=str(ref_html),
         map_type="adc",
         output=str(output),
@@ -334,9 +353,10 @@ def test_build_vendor_compare_html_omits_reference_when_unavailable(tmp_path: Pa
 
     output = tmp_path / "report.html"
     build_vendor_compare_html(
-        vendor_image=str(vendor_image),
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
         vial_masks=vial_masks,
-        vendor_stats=_fake_vendor_stats(["E"]),
+        vendor_stats_list=[_fake_vendor_stats(["E"])],
         reference_html=str(ref_html),
         map_type="adc",
         output=str(output),
@@ -348,6 +368,191 @@ def test_build_vendor_compare_html_omits_reference_when_unavailable(tmp_path: Pa
     datasets = json.loads(m.group(1))
     assert [d["label"] for d in datasets] == ["phantomkit", "Vendor"]
     assert '<select id="vcTempSelect"' not in html
+
+
+# ── build_vendor_compare_html: multiple vendor images ───────────────────────
+
+
+def _setup_multi_vendor_case(tmp_path: Path):
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E", "F"], '
+        '"means": [0.70, 0.90], "stds": [0.02, 0.03]}</script></body></html>'
+    )
+
+    affine = numpy.eye(4)
+    vial_masks = {}
+    for vial in ("E", "F"):
+        p = tmp_path / f"{vial}.nii.gz"
+        nibabel.save(
+            nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), str(p)
+        )
+        vial_masks[vial] = str(p)
+
+    vendor_images = []
+    for name in ("siemens_ADC", "ge_ADC"):
+        p = tmp_path / f"{name}.nii.gz"
+        nibabel.save(
+            nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+            str(p),
+        )
+        vendor_images.append(str(p))
+
+    return ref_html, vial_masks, vendor_images
+
+
+def test_build_vendor_compare_html_multi_vendor_datasets_and_offsets(
+    tmp_path: Path,
+) -> None:
+    ref_html, vial_masks, vendor_images = _setup_multi_vendor_case(tmp_path)
+    vendor_stats_list = [
+        _fake_vendor_stats(["E", "F"]),
+        {
+            v: {
+                "mean": 0.75, "median": 0.74, "std": 0.04, "min": 0.5, "max": 1.0,
+                "count": 400, "p25": 0.7, "p75": 0.8, "mean_mad": 0.03, "median_mad": 0.03,
+            }
+            for v in ("E", "F")
+        },
+    ]
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_images=vendor_images,
+        vendor_labels=["VendorA", "VendorB"],
+        vial_masks=vial_masks,
+        vendor_stats_list=vendor_stats_list,
+        reference_html=str(ref_html),
+        map_type="adc",
+        output=str(output),
+    )
+
+    html = output.read_text()
+    m = re.search(r"const DATASETS = (\[.*?\]);\s*const PK_DATA", html, re.DOTALL)
+    datasets = json.loads(m.group(1))
+    assert [d["label"] for d in datasets] == ["phantomkit", "VendorA", "VendorB"]
+
+    by_label = {d["label"]: d for d in datasets}
+    assert by_label["phantomkit"]["borderColor"] == "#378ADD"
+    assert by_label["VendorA"]["borderColor"] == "#E6B800"
+    assert by_label["VendorB"]["borderColor"] == "#D85A30"
+
+    # Each row is offset to a distinct x position for the same vial (j=0),
+    # symmetric around the vial's integer tick.
+    xs = [ds["data"][0]["x"] for ds in datasets]
+    assert len(set(xs)) == 3
+    assert sum(xs) == pytest.approx(0.0, abs=1e-9)
+
+    # Table gets one value+delta column pair per vendor, indexed by vendor
+    # position (i) and vial position (j).
+    assert 'id="vc-vendor-0-0"' in html and 'id="vc-vendor-1-0"' in html
+    assert 'id="vc-pct-vendor-0-0"' in html and 'id="vc-pct-vendor-1-0"' in html
+    assert "<th>VendorA</th>" in html and "<th>VendorB</th>" in html
+
+
+def test_build_vendor_compare_html_mismatched_list_lengths_raises(
+    tmp_path: Path,
+) -> None:
+    ref_html, vial_masks, vendor_images = _setup_multi_vendor_case(tmp_path)
+
+    with pytest.raises(ValueError, match="same length"):
+        build_vendor_compare_html(
+            vendor_images=vendor_images,
+            vendor_labels=["OnlyOneLabel"],
+            vial_masks=vial_masks,
+            vendor_stats_list=[_fake_vendor_stats(["E", "F"])] * 2,
+            reference_html=str(ref_html),
+            map_type="adc",
+            output=str(tmp_path / "out.html"),
+        )
+
+
+def test_build_vendor_compare_html_viewer_includes_phantomkit_background(
+    tmp_path: Path,
+) -> None:
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E"], '
+        '"means": [0.70], "stds": [0.02]}</script></body></html>'
+    )
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    vial_masks = {"E": str(tmp_path / "E.nii.gz")}
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), vial_masks["E"],
+    )
+    phantomkit_image = tmp_path / "ADC.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(phantomkit_image),
+    )
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
+        vial_masks=vial_masks,
+        vendor_stats_list=[_fake_vendor_stats(["E"])],
+        reference_html=str(ref_html),
+        map_type="adc",
+        output=str(output),
+        phantomkit_image=str(phantomkit_image),
+    )
+
+    html = output.read_text()
+    assert '<select id="pk-bg-select"' in html
+    assert ">phantomkit</option>" in html
+
+
+def test_build_vendor_compare_html_viewer_omits_background_dropdown_for_single_source(
+    tmp_path: Path,
+) -> None:
+    numpy = pytest.importorskip("numpy")
+    nibabel = pytest.importorskip("nibabel")
+
+    ref_html = tmp_path / "ref.html"
+    ref_html.write_text(
+        '<html><body><script id="phantomkit-data" type="application/json">'
+        '{"type": "vial_intensity", "contrast_mode": "adc", "vials": ["E"], '
+        '"means": [0.70], "stds": [0.02]}</script></body></html>'
+    )
+    affine = numpy.eye(4)
+    vendor_image = tmp_path / "vendor.nii.gz"
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.random.rand(6, 6, 6).astype("float32"), affine),
+        str(vendor_image),
+    )
+    vial_masks = {"E": str(tmp_path / "E.nii.gz")}
+    nibabel.save(
+        nibabel.Nifti1Image(numpy.zeros((6, 6, 6), dtype="uint8"), affine), vial_masks["E"],
+    )
+
+    output = tmp_path / "report.html"
+    build_vendor_compare_html(
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
+        vial_masks=vial_masks,
+        vendor_stats_list=[_fake_vendor_stats(["E"])],
+        reference_html=str(ref_html),
+        map_type="adc",
+        output=str(output),
+        # no phantomkit_image -> only one background candidate -> no dropdown
+    )
+
+    html = output.read_text()
+    assert '<select id="pk-bg-select"' not in html
 
 
 # ── ensure_nifti ─────────────────────────────────────────────────────────────
@@ -496,14 +701,15 @@ def test_build_vendor_compare_html_both_series_have_mean_median_when_xlsx_given(
 
     output = tmp_path / "report.html"
     build_vendor_compare_html(
-        vendor_image=str(vendor_image),
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
         vial_masks=vial_masks,
-        vendor_stats=_fake_vendor_stats(["E"]),
+        vendor_stats_list=[_fake_vendor_stats(["E"])],
         reference_html=str(ref_html),
         reference_xlsx=str(xlsx_path),
         map_type="adc",
         output=str(output),
-        scale=1e3,
+        scales=[1e3],
     )
 
     html = output.read_text()
@@ -512,7 +718,7 @@ def test_build_vendor_compare_html_both_series_have_mean_median_when_xlsx_given(
     # Both rows now have distinct mean vs median (not collapsed to the same
     # fixed point) — row 0 is phantomkit, row 1 is vendor.
     assert pk_data["measure"]["mean"][0] != pk_data["measure"]["median"][0]
-    assert "Both series respond" in html
+    assert "Every series responds" in html
 
 
 def test_build_vendor_compare_html_pk_xlsx_scale_independent_of_vendor_scale(
@@ -563,14 +769,15 @@ def test_build_vendor_compare_html_pk_xlsx_scale_independent_of_vendor_scale(
     # (~0.7).
     output = tmp_path / "report.html"
     build_vendor_compare_html(
-        vendor_image=str(vendor_image),
+        vendor_images=[str(vendor_image)],
+        vendor_labels=["Vendor"],
         vial_masks=vial_masks,
-        vendor_stats=_fake_vendor_stats(["E"]),
+        vendor_stats_list=[_fake_vendor_stats(["E"])],
         reference_html=str(ref_html),
         reference_xlsx=str(xlsx_path),
         map_type="adc",
         output=str(output),
-        scale=1e-3,
+        scales=[1e-3],
     )
 
     html = output.read_text()

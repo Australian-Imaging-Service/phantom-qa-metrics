@@ -676,6 +676,237 @@ function pkToggleAllVials() {{
     return html_panel, js_block
 
 
+def _niivue_multi_bg_viewer_panel(
+    backgrounds: list[dict],
+    vial_niftis: dict[str, str],
+    default_index: int = 0,
+) -> tuple[str, str]:
+    """Build an embedded NiiVue viewer panel with a switchable background.
+
+    Like :func:`_niivue_viewer_panel`, but instead of one fixed background
+    volume, accepts several candidate backgrounds (e.g. phantomkit's own
+    map image plus one or more vendor-provided images) and lets the user
+    pick which one is visible via a dropdown. All candidates are loaded
+    up front and switched by opacity (0/1), the same toggle-based approach
+    already used for vial overlays elsewhere in this module — NiiVue has
+    no "swap the background volume" API in the version used here, only
+    per-volume opacity.
+
+    Kept as a separate function (rather than extending
+    ``_niivue_viewer_panel``) so the widely-reused single-background
+    viewer is untouched.
+
+    Parameters
+    ----------
+    backgrounds:
+        ``[{"name": str, "path": str}, ...]`` — one entry per selectable
+        background volume, in dropdown order.
+    vial_niftis:
+        ``{vial_name: path}`` mapping for ROI overlay NIfTI files, loaded
+        after all background candidates. Only files that exist on disk
+        are included.
+    default_index:
+        Which background is visible (opacity 1) on load.
+
+    Returns
+    -------
+    html_panel : str
+        The ``<div>`` element containing the canvas, background dropdown,
+        and vial toggle chips.
+    js_block : str
+        JavaScript that initialises NiiVue and defines ``pkToggleVial``/
+        ``pkSetBackground``.
+    """
+    bg_data = [
+        {"name": bg["name"], "b64": nifti_to_base64(bg["path"])}
+        for bg in backgrounds
+    ]
+
+    vials_data = [
+        {"name": name, "b64": nifti_to_base64(vpath)}
+        for name, vpath in sorted(vial_niftis.items())
+        if vpath and Path(vpath).exists()
+    ]
+
+    chips = "".join(
+        f'<button id="pk-chip-{i}" data-active="1" onclick="pkToggleVial({i},this)"'
+        f' style="padding:4px 12px;border-radius:99px;border:1.5px solid var(--border);'
+        f"background:var(--bg3);color:var(--text);font-size:11px;font-weight:500;"
+        f'cursor:pointer;user-select:none;transition:opacity .15s;">'
+        f'{v["name"]}</button>'
+        for i, v in enumerate(vials_data)
+    )
+    _toggle_all_btn = (
+        '<button id="pk-toggle-all-btn" onclick="pkToggleAllVials()" '
+        'style="padding:4px 12px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text2);font-size:11px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Hide All</button>'
+    ) if vials_data else ""
+    chips_section = (
+        (
+            '<p style="font-size:11px;color:var(--text2);margin-top:10px;margin-bottom:6px;">'
+            "Toggle vial ROIs</p>"
+            f'<div style="display:flex;flex-wrap:wrap;gap:6px;align-items:center;">'
+            f'{_toggle_all_btn}{chips}</div>'
+        )
+        if vials_data
+        else ""
+    )
+
+    bg_select_html = ""
+    if len(backgrounds) > 1:
+        bg_options = "".join(
+            f'<option value="{i}"{" selected" if i == default_index else ""}>{bg["name"]}</option>'
+            for i, bg in enumerate(backgrounds)
+        )
+        bg_select_html = (
+            '<select id="pk-bg-select" onchange="pkSetBackground(parseInt(this.value,10))"'
+            ' style="padding:3px 8px;border-radius:99px;border:1.5px solid var(--border);'
+            'background:var(--bg3);color:var(--text);font-size:11px;font-weight:500;'
+            f'cursor:pointer;">{bg_options}</select>'
+        )
+
+    _zoom_btn_style = (
+        "padding:3px 8px;border-radius:99px;border:1.5px solid var(--border);"
+        "background:var(--bg3);color:var(--text2);font-size:13px;font-weight:600;"
+        "cursor:pointer;user-select:none;transition:opacity .15s;line-height:1;"
+    )
+    html_panel = f"""<div class="chart-card" style="margin-bottom:20px;">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;flex-wrap:wrap;gap:8px;">
+    <p class="chart-title" style="margin:0;">Image Viewer</p>
+    <div style="display:flex;gap:6px;align-items:center;">
+      {bg_select_html}
+      <button onclick="pkZoom(1.25)" style="{_zoom_btn_style}">+</button>
+      <button onclick="pkZoom(1/1.25)" style="{_zoom_btn_style}">&minus;</button>
+      <button id="pk-rad-btn" data-rad="1" onclick="pkToggleRadConvention(this)"
+        style="padding:3px 10px;border-radius:99px;border:1.5px solid var(--border);
+        background:var(--bg3);color:var(--text2);font-size:11px;font-weight:500;
+        cursor:pointer;user-select:none;transition:opacity .15s;">Radiological</button>
+    </div>
+  </div>
+  <canvas id="nv-canvas" style="width:100%;height:300px;display:block;background:#000;border-radius:6px;cursor:crosshair;"></canvas>
+  <p style="font-size:11px;color:var(--text2);margin-top:8px;">Scroll: change slice &middot; Ctrl+scroll or +/&minus;: zoom &middot; drag: adjust contrast &middot; axial / coronal / sagittal</p>
+  {chips_section}
+</div>"""
+
+    bgs_js = json.dumps(bg_data)
+    vials_js = json.dumps(vials_data)
+    default_index_js = json.dumps(default_index)
+
+    js_block = f"""
+var _NV_BGS = {bgs_js};
+var _NV_BG_COUNT = _NV_BGS.length;
+var _NV_DEFAULT_BG = {default_index_js};
+var _NV_VIALS = {vials_js};
+
+(function() {{
+  var canvas = document.getElementById("nv-canvas");
+  if (!canvas) return;
+  var ro = new ResizeObserver(function(entries) {{
+    for (var i = 0; i < entries.length; i++) {{
+      var r = entries[i].contentRect;
+      var w = Math.round(r.width), h = Math.round(r.height);
+      if (w > 0 && h > 0) {{ ro.disconnect(); _pkInitNv(canvas, w, h); break; }}
+    }}
+  }});
+  ro.observe(canvas);
+}})();
+
+function _pkB64ToUrl(b64) {{
+  var bin = atob(b64), arr = new Uint8Array(bin.length);
+  for (var i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+  return URL.createObjectURL(new Blob([arr], {{type:"application/octet-stream"}}));
+}}
+
+function _pkInitNv(canvas, w, h) {{
+  canvas.width = w; canvas.height = h;
+  // Ctrl+scroll → zoom via scene.pan2Dxyzmm[3] (the 2-D zoom scale in NiiVue).
+  // Plain scroll is left for NiiVue's own wheelListener (slice navigation).
+  canvas.addEventListener("wheel", function(e) {{
+    e.preventDefault();
+    if ((e.ctrlKey || e.metaKey) && window._pkNv && window._pkNv.scene) {{
+      e.stopPropagation();
+      var factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+      window._pkNv.scene.pan2Dxyzmm[3] = Math.max(0.1, window._pkNv.scene.pan2Dxyzmm[3] * factor);
+      window._pkNv.drawScene();
+    }}
+  }}, {{ passive: false }});
+  window._pkNv = new niivue.Niivue({{
+    isColorbar: false, crosshairWidth: 1, isResizeCanvas: false,
+    isAntiAlias: false,
+    multiplanarLayout: 3,
+    multiplanarShowRender: 0,
+  }});
+  window._pkNv.attachToCanvas(canvas);
+  window._pkNv.opts.sliceType = 3;
+  var vols = _NV_BGS.map(function(bg, i) {{
+    return {{
+      url: _pkB64ToUrl(bg.b64),
+      name: bg.name + ".nii.gz",
+      colormap: "gray",
+      opacity: i === _NV_DEFAULT_BG ? 1.0 : 0.0,
+    }};
+  }});
+  for (var i = 0; i < _NV_VIALS.length; i++) {{
+    vols.push({{
+      url: _pkB64ToUrl(_NV_VIALS[i].b64),
+      name: _NV_VIALS[i].name + ".nii.gz",
+      colormap: "red",
+      opacity: 0.5,
+    }});
+  }}
+  window._pkNv.loadVolumes(vols).then(function() {{
+    window._pkNv.setRadiologicalConvention(true);
+  }});
+}}
+
+function pkSetBackground(idx) {{
+  if (!window._pkNv) return;
+  for (var i = 0; i < _NV_BG_COUNT; i++) {{
+    window._pkNv.setOpacity(i, i === idx ? 1.0 : 0.0);
+  }}
+}}
+
+function pkToggleVial(idx, btn) {{
+  if (!window._pkNv) return;
+  var wasActive = btn.dataset.active === "1";
+  btn.dataset.active = wasActive ? "0" : "1";
+  btn.style.opacity = wasActive ? "0.35" : "1.0";
+  window._pkNv.setOpacity(_NV_BG_COUNT + idx, wasActive ? 0.0 : 0.5);
+}}
+
+function pkZoom(factor) {{
+  if (!window._pkNv || !window._pkNv.scene) return;
+  window._pkNv.scene.pan2Dxyzmm[3] = Math.max(0.1, window._pkNv.scene.pan2Dxyzmm[3] * factor);
+  window._pkNv.drawScene();
+}}
+
+function pkToggleRadConvention(btn) {{
+  if (!window._pkNv) return;
+  var isRad = btn.dataset.rad === "1";
+  btn.dataset.rad = isRad ? "0" : "1";
+  btn.textContent = isRad ? "Neurological" : "Radiological";
+  window._pkNv.setRadiologicalConvention(!isRad);
+}}
+
+function pkToggleAllVials() {{
+  var btns = Array.from(document.querySelectorAll('[id^="pk-chip-"]'));
+  if (!btns.length) return;
+  var anyActive = btns.some(function(b) {{ return b.dataset.active === "1"; }});
+  btns.forEach(function(b) {{
+    var isActive = b.dataset.active === "1";
+    if (anyActive ? isActive : !isActive) b.click();
+  }});
+  var toggleBtn = document.getElementById("pk-toggle-all-btn");
+  if (toggleBtn) {{
+    var nowAny = btns.some(function(b) {{ return b.dataset.active === "1"; }});
+    toggleBtn.textContent = nowAny ? "Hide All" : "Show All";
+  }}
+}}
+"""
+    return html_panel, js_block
+
+
 # ---------------------------------------------------------------------------
 # Relaxometry (IR / TE) 3×3 HTML builder
 # ---------------------------------------------------------------------------

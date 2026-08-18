@@ -30,7 +30,8 @@ _MAP_TYPE_INFO = {
 def locate_reference(output_dir: Path, map_type: str) -> dict:
     """Find the existing phantomkit report + vial masks for map_type under output_dir.
 
-    Returns {"report_html": Path, "vial_masks": {vial_name: Path}}.
+    Returns {"report_html": Path, "vial_masks": {vial_name: Path},
+    "reference_xlsx": Path | None, "phantomkit_image": Path | None}.
     Raises click.ClickException with a clear message if zero or multiple
     candidates are found.
     """
@@ -101,11 +102,37 @@ def locate_reference(output_dir: Path, map_type: str) -> dict:
         if len(xlsx_candidates) == 1:
             reference_xlsx = xlsx_candidates[0]
 
+    # phantomkit's own computed ADC map image (dwi_processing.py's
+    # copy_final_outputs_task writes it as a sibling of vial_segmentations/
+    # under the same series directory) — offered as an extra viewer
+    # background option alongside the vendor images. T1/T2 have no
+    # equivalent per-voxel map (only per-vial curve-fit CSVs), so this is
+    # ADC-only.
+    phantomkit_image = None
+    if map_type == "adc":
+        candidate = vial_seg_dir.parent / "ADC.nii.gz"
+        if candidate.exists():
+            phantomkit_image = candidate
+
     return {
         "report_html": report_html,
         "vial_masks": vial_masks,
         "reference_xlsx": reference_xlsx,
+        "phantomkit_image": phantomkit_image,
     }
+
+
+def image_stem(image_path: Path) -> str:
+    """Strip a known image extension (including double extensions like
+    ``.nii.gz``) from a path's filename — used both to name normalized
+    output files and to derive a default vendor image label."""
+    name = image_path.name
+    stem = name
+    for ext in (".mif.gz", ".mif", ".nii.gz", ".nii"):
+        if stem.endswith(ext):
+            stem = stem[: -len(ext)]
+            break
+    return stem
 
 
 def ensure_nifti(image_path: Path, tmp_dir: Path) -> Path:
@@ -125,12 +152,7 @@ def ensure_nifti(image_path: Path, tmp_dir: Path) -> Path:
     Converting once upfront also keeps stats computation and the viewer
     consistent on the same file.
     """
-    name = image_path.name
-    stem = name
-    for ext in (".mif.gz", ".mif", ".nii.gz", ".nii"):
-        if stem.endswith(ext):
-            stem = stem[: -len(ext)]
-            break
+    stem = image_stem(image_path)
 
     tmp_dir.mkdir(parents=True, exist_ok=True)
     out = tmp_dir / f"{stem}_normalized.nii.gz"

@@ -143,11 +143,12 @@ class PlotReq(BaseModel):
 
 
 class VendorCompareReq(BaseModel):
-    output_dir:   str
-    vendor_image: str
-    map_type:     str
-    phantom:      str = ""
-    output:       str
+    output_dir:     str
+    vendor_images:  list[str]
+    vendor_labels:  list[str] = []
+    map_type:       str
+    phantom:        str = ""
+    output:         str
 
 
 # ── Run endpoints ─────────────────────────────────────────────────────────────
@@ -229,10 +230,14 @@ async def run_longitudinal(r: PlotReq):
 @app.post("/api/run/vendor-compare")
 async def run_vendor_compare(r: VendorCompareReq):
     cmd = [sys.executable, "-m", "phantomkit", "vendor-compare",
-           "--output-dir",   r.output_dir,
-           "--vendor-image", r.vendor_image,
-           "--map-type",     r.map_type,
-           "-o",             r.output]
+           "--output-dir", r.output_dir,
+           "--map-type",   r.map_type,
+           "-o",           r.output]
+    for img in r.vendor_images:
+        cmd += ["--vendor-image", img]
+    for lbl in r.vendor_labels:
+        if lbl:
+            cmd += ["--vendor-label", lbl]
     if r.phantom:
         cmd += ["--phantom", r.phantom]
     return StreamingResponse(_stream(cmd), media_type="text/event-stream")
@@ -572,12 +577,13 @@ button { cursor: pointer; border: none; border-radius: 6px;
       </select>
     </div>
 
-    <div class="field-row">
-      <label>Vendor image</label>
-      <div class="input-group">
-        <input type="text" id="v-vendor-image" placeholder="/path/to/siemens_ADC.nii.gz">
-        <button class="btn-sm" onclick="openBrowser('v-vendor-image','file')">Browse…</button>
-      </div>
+  </div>
+
+  <div class="card">
+    <div class="card-title">Vendor images</div>
+    <div class="file-list" id="v-vendor-list"></div>
+    <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:4px">
+      <button class="btn-sm" onclick="addFileRow('v-vendor-list','file')">+ Add vendor image</button>
     </div>
   </div>
 
@@ -650,6 +656,7 @@ const DWI_STEPS = __STEPS__;
 
   // Initial file rows
   addFileRow('c-file-list', 'html');
+  addFileRow('v-vendor-list', 'file');
 })();
 
 // ── Tab switching ────────────────────────────────────────────────────────────
@@ -1030,21 +1037,22 @@ function runCompare() {
 
 // ── Vendor Comparison ────────────────────────────────────────────────────────
 function runVendorCompare() {
-  var outputDir   = document.getElementById('v-output-dir').value.trim();
-  var vendorImage = document.getElementById('v-vendor-image').value.trim();
-  var mapType     = document.getElementById('v-map-type').value;
-  var phantom     = document.getElementById('v-phantom').value;
-  var output      = document.getElementById('v-output').value.trim();
-  if (!outputDir)   { alert('Select the pipeline output directory.'); return; }
-  if (!vendorImage) { alert('Select the vendor image.'); return; }
-  if (!output)      { alert('Choose an output HTML path.'); return; }
+  var outputDir = document.getElementById('v-output-dir').value.trim();
+  var rows      = getFileRows('v-vendor-list');
+  var mapType   = document.getElementById('v-map-type').value;
+  var phantom   = document.getElementById('v-phantom').value;
+  var output    = document.getElementById('v-output').value.trim();
+  if (!outputDir)            { alert('Select the pipeline output directory.'); return; }
+  if (rows.files.length < 1) { alert('Select at least one vendor image.'); return; }
+  if (!output)                { alert('Choose an output HTML path.'); return; }
 
   streamRun('/api/run/vendor-compare', {
-    output_dir:   outputDir,
-    vendor_image: vendorImage,
-    map_type:     mapType,
-    phantom:      phantom,
-    output:       output,
+    output_dir:     outputDir,
+    vendor_images:  rows.files,
+    vendor_labels:  rows.labels,
+    map_type:       mapType,
+    phantom:        phantom,
+    output:         output,
   }, 'v-log', 'v-run-btn', function() {
     showHtmlButtons('v-log', [output]);
   });

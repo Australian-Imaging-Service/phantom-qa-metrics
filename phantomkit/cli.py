@@ -761,10 +761,19 @@ def run_pipeline(
     help="Completed pipeline's session output directory.",
 )
 @click.option(
-    "--vendor-image",
+    "--vendor-image", "vendor_images",
     required=True,
+    multiple=True,
     type=click.Path(exists=True),
-    help="Vendor-generated parametric map NIfTI (e.g. siemens_ADC.nii.gz).",
+    help="Vendor-generated parametric map NIfTI (e.g. siemens_ADC.nii.gz). "
+         "Repeat once per vendor image to compare several at once.",
+)
+@click.option(
+    "--vendor-label", "vendor_labels",
+    multiple=True,
+    metavar="TEXT",
+    help="Label for each --vendor-image (repeat once per image, same order; "
+         "defaults to each image's filename stem when omitted entirely).",
 )
 @click.option(
     "--map-type",
@@ -790,25 +799,35 @@ def run_pipeline(
     help="Output HTML report path.",
 )
 def vendor_compare(
-    output_dir: str, vendor_image: str, map_type: str, phantom: str,
-    template_dir: str | None, output: str,
+    output_dir: str, vendor_images: tuple[str, ...], vendor_labels: tuple[str, ...],
+    map_type: str, phantom: str, template_dir: str | None, output: str,
 ) -> None:
-    """Compare a vendor-provided ADC/T1/T2 map against phantomkit's own values, per vial."""
+    """Compare one or more vendor-provided ADC/T1/T2 maps against phantomkit's own values, per vial."""
     import tempfile
 
     from phantomkit.pipeline import print_header
     from phantomkit.vendor_compare import (
-        locate_reference, compute_vendor_vial_stats, ensure_nifti, infer_adc_scale,
+        locate_reference, compute_vendor_vial_stats, ensure_nifti, infer_adc_scale, image_stem,
     )
     from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
+
+    if vendor_labels and len(vendor_labels) != len(vendor_images):
+        raise click.ClickException(
+            f"--vendor-label provided {len(vendor_labels)} time(s) but "
+            f"{len(vendor_images)} --vendor-image given — counts must match."
+        )
+    labels = list(vendor_labels) if vendor_labels else [
+        image_stem(Path(p)) for p in vendor_images
+    ]
 
     output_path = Path(output_dir)
     map_type = map_type.lower()
 
     print_header("Vendor Comparison")
     print(f"  Output dir:    {output_path}")
-    print(f"  Vendor image:  {vendor_image}")
     print(f"  Map type:      {map_type.upper()}")
+    for label, path in zip(labels, vendor_images):
+        print(f"  Vendor image:  {label} ({path})")
     print()
 
     print("  Locating phantomkit's existing report and vial masks...")
@@ -817,35 +836,51 @@ def vendor_compare(
     print(f"    Vial masks:  {len(ref['vial_masks'])} found")
     if ref.get("reference_xlsx"):
         print(f"    Reference xlsx: {ref['reference_xlsx']} (full mean/median/CI available)")
+    if ref.get("phantomkit_image"):
+        print(f"    phantomkit image: {ref['phantomkit_image']} (available as a viewer background)")
 
     with tempfile.TemporaryDirectory(prefix="phantomkit_vendor_compare_") as tmp:
-        print("\n  Normalizing vendor image for the viewer (mrconvert)...")
-        vendor_nifti = ensure_nifti(Path(vendor_image), Path(tmp))
-        print(f"    {vendor_nifti.name}")
+        vendor_nifti_paths = []
+        vendor_stats_list = []
+        scales = []
+        for i, (label, vendor_image) in enumerate(zip(labels, vendor_images)):
+            # Namespaced by index, not label — labels are free text (e.g.
+            # user-supplied via the GUI) and may contain characters unsafe
+            # for a directory name.
+            vendor_tmp = Path(tmp) / f"vendor{i}"
+            print(f"\n  [{label}] Normalizing vendor image for the viewer (mrconvert)...")
+            vendor_nifti = ensure_nifti(Path(vendor_image), vendor_tmp)
+            print(f"    {vendor_nifti.name}")
 
-        print("\n  Regridding vial masks onto the vendor image and computing stats...")
-        vendor_stats = compute_vendor_vial_stats(
-            vendor_nifti, ref["vial_masks"], Path(tmp)
-        )
-        print(f"    Computed stats for {len(vendor_stats)} vials")
+            print(f"  [{label}] Regridding vial masks onto the vendor image and computing stats...")
+            vendor_stats = compute_vendor_vial_stats(
+                vendor_nifti, ref["vial_masks"], vendor_tmp
+            )
+            print(f"    Computed stats for {len(vendor_stats)} vials")
 
-        scale = infer_adc_scale(vendor_stats) if map_type == "adc" else 1.0
-        if map_type == "adc":
-            print(f"    Detected unit scale for vendor ADC values: x{scale:g} "
-                  f"(vs. phantomkit's own x10⁻³ mm²/s convention)")
+            scale = infer_adc_scale(vendor_stats) if map_type == "adc" else 1.0
+            if map_type == "adc":
+                print(f"    Detected unit scale for {label}: x{scale:g} "
+                      f"(vs. phantomkit's own x10⁻³ mm²/s convention)")
+
+            vendor_nifti_paths.append(str(vendor_nifti))
+            vendor_stats_list.append(vendor_stats)
+            scales.append(scale)
 
         print("\n  Building comparison report...")
         build_vendor_compare_html(
-            vendor_image=str(vendor_nifti),
+            vendor_images=vendor_nifti_paths,
+            vendor_labels=labels,
             vial_masks={k: str(v) for k, v in ref["vial_masks"].items()},
-            vendor_stats=vendor_stats,
+            vendor_stats_list=vendor_stats_list,
             reference_html=str(ref["report_html"]),
             reference_xlsx=str(ref["reference_xlsx"]) if ref.get("reference_xlsx") else None,
             template_dir=template_dir,
             map_type=map_type,
             output=output,
             phantom=phantom,
-            scale=scale,
+            scales=scales,
+            phantomkit_image=str(ref["phantomkit_image"]) if ref.get("phantomkit_image") else None,
         )
 
     print_header("Vendor Comparison Complete")

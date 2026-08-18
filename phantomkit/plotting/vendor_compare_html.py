@@ -1,10 +1,11 @@
 """
 vendor_compare_html.py
 =======================
-Build the vendor-comparison HTML report: an interactive viewer (vendor image
-+ vial overlays, per-vial and toggle-all) plus a per-vial comparison chart
-of phantomkit's own value against the vendor's, with Mean/Median and
-error-bar-variant toggles.
+Build the vendor-comparison HTML report: an interactive viewer (switchable
+background — phantomkit's own map image when available, plus every vendor
+image — with vial overlays, per-vial and toggle-all) plus a per-vial
+comparison chart of phantomkit's own value against one or more vendor
+images', with Mean/Median and error-bar-variant toggles.
 
 For ADC, phantomkit's own series gets the SAME full mean/median/percentile
 distribution the freshly-computed vendor series does (read from
@@ -12,7 +13,7 @@ phantom_processor.py's own per-vial xlsx, when available) — both series
 respond to the Mean/Median and error-bar toggle buttons. For T1/T2, there is
 no such distribution (a curve fit only produces one value per vial), so
 phantomkit's point stays at a single fixed value ± its curve-fit SE, fed
-into the same error-mode formula the vendor side uses, while the vendor
+into the same error-mode formula the vendor side uses, while every vendor
 series (which DOES have real per-voxel stats) still responds fully.
 
 Not registered as a CLI command — called directly by ``phantomkit
@@ -37,38 +38,52 @@ _Y_LABELS = {
 
 # Colors follow the app-wide convention: red is reserved for the
 # calibration-config reference value (compare_plots._REFERENCE_COLOR,
-# vial_intensity.py's "Reference ADC"), so the freshly-computed vendor
-# series uses yellow instead to avoid colliding with that meaning.
+# vial_intensity.py's "Reference ADC"), so vendor series use the palette
+# below instead to avoid colliding with that meaning. Vendor #1 keeps the
+# original yellow so the single-vendor case looks identical to before;
+# additional vendors cycle through the rest of _html_common's _PALETTE,
+# skipping phantomkit's own blue.
 _PHANTOMKIT_COLOR = "#378ADD"
-_VENDOR_COLOR = "#E6B800"
+_VENDOR_COLORS = [
+    "#E6B800", "#D85A30", "#7F77DD", "#1D9E75", "#BA7517",
+    "#D4537E", "#639922", "#888780", "#185FA5", "#993C1D",
+]
 _REFERENCE_COLOR = "#C62828"
 
 
 def build_vendor_compare_html(
-    vendor_image: str,
+    vendor_images: list[str],
+    vendor_labels: list[str],
     vial_masks: dict[str, str],
-    vendor_stats: dict,
+    vendor_stats_list: list[dict],
     reference_html: str,
     map_type: str,
     output: str,
     phantom: str = "",
     template_dir: str | None = None,
     reference_xlsx: str | None = None,
-    scale: float | None = None,
+    scales: list[float | None] | None = None,
+    phantomkit_image: str | None = None,
 ) -> None:
     """Build the self-contained vendor-comparison HTML report.
 
     Parameters
     ----------
-    vendor_image:
-        Path to the vendor NIfTI (used as the viewer background).
+    vendor_images:
+        Paths to the vendor NIfTIs (each becomes a selectable viewer
+        background), one per vendor.
+    vendor_labels:
+        Display label per vendor image, same order/length as
+        ``vendor_images`` — used as the chart legend entry, table column
+        header, and viewer background dropdown option.
     vial_masks:
         ``{vial_name: mask_path}`` — phantomkit's own vial masks (as
         located by :func:`phantomkit.vendor_compare.locate_reference`),
         used for the viewer overlay.
-    vendor_stats:
-        ``{vial_name: {mean, median, std, min, max, count, p25, p75,
-        mean_mad, median_mad}}`` from
+    vendor_stats_list:
+        One ``{vial_name: {mean, median, std, min, max, count, p25, p75,
+        mean_mad, median_mad}}`` dict per vendor image, same order as
+        ``vendor_images``, from
         :func:`phantomkit.vendor_compare.compute_vendor_vial_stats`.
     reference_html:
         Path to phantomkit's own existing report for this session/map-type.
@@ -84,16 +99,23 @@ def build_vendor_compare_html(
         phantomkit's series the same full mean/median/percentile
         distribution the vendor series has. Falls back to a fixed point ±
         std (from reference_html) if omitted or unreadable.
-    scale:
-        Multiplier applied to the *vendor* series only, to bring it in
-        line with phantomkit's ×10⁻³ mm²/s display convention. Vendor ADC
-        maps show up in several different unit conventions in the wild
-        (see :func:`phantomkit.vendor_compare.infer_adc_scale`, used to
-        auto-detect this when not given). phantomkit's own xlsx-derived
-        stats (when reference_xlsx is given) always use a fixed ×1000 —
+    scales:
+        Per-vendor multiplier, same order/length as ``vendor_images``,
+        applied to that vendor's series only, to bring it in line with
+        phantomkit's ×10⁻³ mm²/s display convention. Vendor ADC maps show
+        up in several different unit conventions in the wild (see
+        :func:`phantomkit.vendor_compare.infer_adc_scale`, used to
+        auto-detect a `None` entry). phantomkit's own xlsx-derived stats
+        (when reference_xlsx is given) always use a fixed ×1000 —
         `_task_extract_metrics` always writes raw mrstats output
-        (mm²/s), a known, fixed convention independent of whatever the
-        vendor file happens to use. Unused (1.0) for T1/T2.
+        (mm²/s), a known, fixed convention independent of whatever any
+        vendor file happens to use. Unused (1.0) for T1/T2. Pass `None`
+        (the whole parameter) to auto-infer every vendor's scale.
+    phantomkit_image:
+        Path to phantomkit's own computed map image (currently ADC only —
+        `dwi_processing.py` writes `ADC.nii.gz`; T1/T2 have no equivalent
+        per-voxel map), offered as an extra viewer background option.
+        Omitted from the viewer entirely when `None`.
     """
     from phantomkit.plotting._html_common import (
         html_head,
@@ -103,19 +125,40 @@ def build_vendor_compare_html(
         _compute_pk_err_bounds,
         base_opts_js,
         phantomkit_data_tag,
-        _niivue_viewer_panel,
+        _niivue_multi_bg_viewer_panel,
     )
     from phantomkit.plotting.compare_plots import _load_embedded, _extract, _auto_template_dir
     from phantomkit.plotting._calibration_reference import load_calibration_reference
     from phantomkit.vendor_compare import infer_adc_scale, load_full_stats_from_xlsx
 
+    n_vendors = len(vendor_images)
+    if not (len(vendor_labels) == len(vendor_stats_list) == n_vendors):
+        raise ValueError(
+            "vendor_images, vendor_labels, and vendor_stats_list must all "
+            f"have the same length (got {n_vendors}, {len(vendor_labels)}, "
+            f"{len(vendor_stats_list)})."
+        )
+    if scales is None:
+        scales = [None] * n_vendors
+    elif len(scales) != n_vendors:
+        raise ValueError(
+            f"scales has {len(scales)} entries but {n_vendors} vendor "
+            "images were given."
+        )
+
     metric, ref_vials_order, ref_vals, ref_se = _extract(_load_embedded(reference_html))
     y_label = _Y_LABELS.get(metric, metric)
-    if scale is None:
-        scale = infer_adc_scale(vendor_stats) if map_type == "adc" else 1.0
+
+    resolved_scales: list[float] = []
+    for i in range(n_vendors):
+        s = scales[i]
+        if s is None:
+            s = infer_adc_scale(vendor_stats_list[i]) if map_type == "adc" else 1.0
+        resolved_scales.append(s)
+
     # phantomkit's own xlsx is always raw mrstats output (mm²/s) — a fixed,
-    # known convention, independent of whichever convention the vendor
-    # file happens to use. Must NOT share `scale` (vendor-specific) above.
+    # known convention, independent of whichever convention any vendor
+    # file happens to use. Must NOT share a vendor's `resolved_scales[i]`.
     pk_xlsx_scale = 1e3 if map_type == "adc" else 1.0
 
     pk_full_stats = None
@@ -125,17 +168,18 @@ def build_vendor_compare_html(
         except Exception:
             pk_full_stats = None
 
-    # Common vial axis: vials present in both phantomkit's reference and the
-    # freshly-computed vendor stats (matched case-insensitively).
-    vendor_by_upper = {v.upper(): v for v in vendor_stats}
+    # Common vial axis: vials present in phantomkit's reference AND every
+    # vendor's stats (matched case-insensitively).
+    vendor_by_upper_list = [{v.upper(): v for v in vs} for vs in vendor_stats_list]
     vials = [
         v for v in ref_vials_order
-        if v.upper() in vendor_by_upper and ref_vals.get(v.upper()) is not None
+        if ref_vals.get(v.upper()) is not None
+        and all(v.upper() in vbu for vbu in vendor_by_upper_list)
     ]
     if not vials:
         raise ValueError(
             "No vials in common between the phantomkit reference "
-            f"({reference_html}) and the vendor image's vial masks."
+            f"({reference_html}) and all {n_vendors} vendor image(s)' vial masks."
         )
     n = len(vials)
 
@@ -168,22 +212,23 @@ def build_vendor_compare_html(
                 ref_pts.append({"x": j, "y": round(val, 4)})
                 ref_value_by_vial[v] = round(val, 4)
 
-    # Row 0 = phantomkit, row 1 = vendor. Both get the full
-    # mean/median/percentile treatment when real distribution data is
-    # available (always true for vendor; true for phantomkit only when
-    # reference_xlsx was found for ADC) — otherwise a row falls back to a
-    # single fixed point ± one spread value, replicated across every
+    # Row 0 = phantomkit, rows 1..n_vendors = each vendor. Every row gets
+    # the full mean/median/percentile treatment when real distribution
+    # data is available (always true for vendors; true for phantomkit only
+    # when reference_xlsx was found for ADC) — otherwise a row falls back
+    # to a single fixed point ± one spread value, replicated across every
     # error-mode variant.
-    mean_m       = np.zeros((2, n))
-    median_m     = np.zeros((2, n))
-    std_m        = np.zeros((2, n))
-    count_m      = np.ones((2, n))
-    p25_m        = np.zeros((2, n))
-    p75_m        = np.zeros((2, n))
-    min_m        = np.zeros((2, n))
-    max_m        = np.zeros((2, n))
-    mean_mad_m   = np.zeros((2, n))
-    median_mad_m = np.zeros((2, n))
+    n_rows = 1 + n_vendors
+    mean_m       = np.zeros((n_rows, n))
+    median_m     = np.zeros((n_rows, n))
+    std_m        = np.zeros((n_rows, n))
+    count_m      = np.ones((n_rows, n))
+    p25_m        = np.zeros((n_rows, n))
+    p75_m        = np.zeros((n_rows, n))
+    min_m        = np.zeros((n_rows, n))
+    max_m        = np.zeros((n_rows, n))
+    mean_mad_m   = np.zeros((n_rows, n))
+    median_mad_m = np.zeros((n_rows, n))
 
     def _fill_row(row: int, j: int, s: dict, row_scale: float) -> None:
         mean = s.get("mean")
@@ -223,7 +268,7 @@ def build_vendor_compare_html(
         pk_full = pk_full_stats.get(vu) if pk_full_stats else None
         if pk_full and pk_full.get("mean") is not None:
             # Raw (un-scaled) xlsx stats — always phantomkit's own fixed
-            # ×1000 convention, NOT the vendor's auto-detected scale.
+            # ×1000 convention, NOT any vendor's auto-detected scale.
             _fill_row(0, j, pk_full, pk_xlsx_scale)
             has_full_pk_stats = True
         else:
@@ -233,7 +278,12 @@ def build_vendor_compare_html(
             pk_width = ref_se.get(vu) or 0.0
             _fill_row(0, j, {"mean": pk_val, "std": pk_width}, 1.0)
 
-        _fill_row(1, j, vendor_stats[vendor_by_upper[vu]], scale)
+        for i in range(n_vendors):
+            _fill_row(
+                1 + i, j,
+                vendor_stats_list[i][vendor_by_upper_list[i][vu]],
+                resolved_scales[i],
+            )
 
     err_bounds = _compute_pk_err_bounds(
         mean_m, median_m, std_m, count_m, p25_m, p75_m, min_m, max_m,
@@ -244,10 +294,13 @@ def build_vendor_compare_html(
         "errBounds": err_bounds,
     }
 
-    # Small horizontal offset so the two series don't sit exactly on top of
-    # each other at each vial's x position, which made them hard to
-    # distinguish when their values were close.
-    _X_OFFSET = 0.15
+    # Horizontal offset so series don't sit exactly on top of each other at
+    # each vial's x position, which made them hard to distinguish when
+    # their values were close. Step shrinks as the number of rows grows so
+    # the cluster never spills into the neighboring vial's space; for a
+    # single vendor (n_rows=2) this reproduces the original ±0.15 layout.
+    step = min(0.3, 0.6 / (n_rows - 1)) if n_rows > 1 else 0.0
+    offsets = [(i - (n_rows - 1) / 2) * step for i in range(n_rows)]
 
     def _dataset(row: int, label: str, color: str, x_offset: float) -> dict:
         pts = [
@@ -276,10 +329,11 @@ def build_vendor_compare_html(
             "showLine": False,
         }
 
-    datasets = [
-        _dataset(0, "phantomkit", _PHANTOMKIT_COLOR, x_offset=-_X_OFFSET),
-        _dataset(1, "Vendor", _VENDOR_COLOR, x_offset=_X_OFFSET),
-    ]
+    datasets = [_dataset(0, "phantomkit", _PHANTOMKIT_COLOR, offsets[0])]
+    for i in range(n_vendors):
+        datasets.append(_dataset(
+            1 + i, vendor_labels[i], _VENDOR_COLORS[i % len(_VENDOR_COLORS)], offsets[1 + i],
+        ))
     if ref_pts:
         # Static overlay, not part of the _row/PK_DATA measure system — the
         # calibration reference has no mean/median or spread concept at all,
@@ -307,35 +361,54 @@ def build_vendor_compare_html(
         v: str(vial_masks_by_upper[v.upper()])
         for v in vials if v.upper() in vial_masks_by_upper
     }
-    viewer_html, viewer_js = _niivue_viewer_panel(vendor_image, viewer_vial_masks)
+    backgrounds = []
+    if phantomkit_image:
+        backgrounds.append({"name": "phantomkit", "path": str(phantomkit_image)})
+    for i in range(n_vendors):
+        backgrounds.append({"name": vendor_labels[i], "path": str(vendor_images[i])})
+    # Default selection stays the first vendor image, matching the
+    # single-vendor report's previous behavior, even when phantomkit's
+    # image is also offered (and thus listed first in the dropdown).
+    default_bg_index = 1 if phantomkit_image else 0
+    viewer_html, viewer_js = _niivue_multi_bg_viewer_panel(
+        backgrounds, viewer_vial_masks, default_index=default_bg_index,
+    )
 
-    title = f"{phantom + ' — ' if phantom else ''}Vendor vs phantomkit: {metric} per vial"
+    vendor_word = "vendor" if n_vendors == 1 else f"{n_vendors} vendors"
+    title = f"{phantom + ' — ' if phantom else ''}{vendor_word} vs phantomkit: {metric} per vial"
     embedded = {
         "type": "vendor_compare",
         "map_type": map_type,
         "phantom": phantom,
         "vials": vials,
         "phantomkit": {v: ref_vals[v.upper()] for v in vials},
-        "vendor": {v: vendor_stats[vendor_by_upper[v.upper()]] for v in vials},
+        "vendors": [
+            {
+                "label": vendor_labels[i],
+                "image": str(vendor_images[i]),
+                "stats": {v: vendor_stats_list[i][vendor_by_upper_list[i][v.upper()]] for v in vials},
+            }
+            for i in range(n_vendors)
+        ],
     }
 
     if has_full_pk_stats:
         footnote = (
-            "Both series respond to the Mean/Median and error-bar toggles — "
+            "Every series responds to the Mean/Median and error-bar toggles — "
             "phantomkit's own per-vial voxel distribution, from its own xlsx."
         )
     else:
         footnote = (
             "phantomkit's own value has a single fixed spread (no per-vial "
             "voxel distribution available for this map type); only the "
-            "Vendor series moves with the Mean/Median toggle."
+            "vendor series move with the Mean/Median toggle."
         )
 
     # ------------------------------------------------------------------
-    # Per-vial comparison table: reference / vendor / phantomkit values and
-    # each series' percentage difference from the reference value. Static
-    # cells are seeded with the initial (mean) values and refreshed by
-    # _pkAfterUpdate whenever the Mean/Median toggle changes.
+    # Per-vial comparison table: reference / vendor(s) / phantomkit values
+    # and each series' percentage difference from the reference value.
+    # Static cells are seeded with the initial (mean) values and refreshed
+    # by _pkAfterUpdate whenever the Mean/Median toggle changes.
     # ------------------------------------------------------------------
     def _fmt(v: float | None) -> str:
         return "—" if v is None else f"{v:.4g}"
@@ -349,17 +422,17 @@ def build_vendor_compare_html(
     for j, v in enumerate(vials):
         ref_val = ref_value_by_vial.get(v)
         pk_val = float(mean_m[0, j])
-        vendor_val = float(mean_m[1, j])
-        table_rows += (
-            f'    <tr>'
-            f'<td>{v}</td>'
-            f'<td id="vc-ref-{j}">{_fmt(ref_val)}</td>'
-            f'<td id="vc-vendor-{j}">{_fmt(vendor_val)}</td>'
-            f'<td id="vc-pk-{j}">{_fmt(pk_val)}</td>'
-            f'<td id="vc-pct-vendor-{j}">{_fmt_pct(vendor_val, ref_val)}</td>'
-            f'<td id="vc-pct-pk-{j}">{_fmt_pct(pk_val, ref_val)}</td>'
-            f'</tr>\n'
-        )
+        vendor_vals = [float(mean_m[1 + i, j]) for i in range(n_vendors)]
+        cells = [f'<td>{v}</td>', f'<td id="vc-ref-{j}">{_fmt(ref_val)}</td>']
+        for i in range(n_vendors):
+            cells.append(f'<td id="vc-vendor-{i}-{j}">{_fmt(vendor_vals[i])}</td>')
+        cells.append(f'<td id="vc-pk-{j}">{_fmt(pk_val)}</td>')
+        for i in range(n_vendors):
+            cells.append(
+                f'<td id="vc-pct-vendor-{i}-{j}">{_fmt_pct(vendor_vals[i], ref_val)}</td>'
+            )
+        cells.append(f'<td id="vc-pct-pk-{j}">{_fmt_pct(pk_val, ref_val)}</td>')
+        table_rows += "    <tr>" + "".join(cells) + "</tr>\n"
 
     if temperatures:
         temp_options = "".join(
@@ -377,15 +450,20 @@ def build_vendor_compare_html(
     else:
         temp_selector_html = ""
 
+    vendor_value_headers = "".join(f"<th>{lbl}</th>" for lbl in vendor_labels)
+    vendor_pct_headers = "".join(f"<th>&Delta; {lbl}</th>" for lbl in vendor_labels)
+
     table_html = f"""<div class="stats-section">
   <div class="stats-title">Per-vial comparison vs reference</div>
+  <div style="overflow-x:auto;">
   <table class="stats-table">
     <thead>
-      <tr><th>Vial</th><th>Reference</th><th>Vendor</th><th>phantomkit</th><th>&Delta; Vendor</th><th>&Delta; phantomkit</th></tr>
+      <tr><th>Vial</th><th>Reference</th>{vendor_value_headers}<th>phantomkit</th>{vendor_pct_headers}<th>&Delta; phantomkit</th></tr>
     </thead>
     <tbody>
 {table_rows}    </tbody>
   </table>
+  </div>
   <p style="font-size:11px;color:var(--text2);margin-top:8px;">
     &Delta; columns are percentage difference from the reference value. Table follows the Mean/Median toggle and reference temperature above.
   </p>
@@ -398,6 +476,7 @@ def build_vendor_compare_html(
     vials_json = json.dumps(vials)
     pk_data_json = json.dumps(pk_data)
     y_label_json = json.dumps(y_label)
+    n_vendors_json = json.dumps(n_vendors)
     data_tag = phantomkit_data_tag(embedded)
     opts_js = base_opts_js(x_label="Vial", y_label=y_label, enable_zoom=True)
     head = html_head(title, include_niivue=True)
@@ -429,6 +508,7 @@ const VIALS = {vials_json};
 const DATASETS = {datasets_json};
 const PK_DATA = {pk_data_json};
 const VC_REF_BY_TEMP = {ref_by_temp_json};
+const VC_N_VENDORS = {n_vendors_json};
 let _vcCurrentTemp = {default_temp_json};
 
 {ERROR_BAR_PLUGIN_JS}
@@ -447,18 +527,20 @@ function _vcUpdateTable() {{
   const refVals = _vcRefValues();
   VIALS.forEach((v, j) => {{
     const pk = PK_DATA.measure[m][0][j];
-    const vendor = PK_DATA.measure[m][1][j];
     const ref = refVals[j];
     const refEl = document.getElementById("vc-ref-" + j);
     const pkEl = document.getElementById("vc-pk-" + j);
-    const vendorEl = document.getElementById("vc-vendor-" + j);
     const pctPkEl = document.getElementById("vc-pct-pk-" + j);
-    const pctVendorEl = document.getElementById("vc-pct-vendor-" + j);
     if (refEl) refEl.textContent = _vcFmt(ref);
     if (pkEl) pkEl.textContent = _vcFmt(pk);
-    if (vendorEl) vendorEl.textContent = _vcFmt(vendor);
     if (pctPkEl) pctPkEl.textContent = _vcFmtPct(pk, ref);
-    if (pctVendorEl) pctVendorEl.textContent = _vcFmtPct(vendor, ref);
+    for (let i = 0; i < VC_N_VENDORS; i++) {{
+      const val = PK_DATA.measure[m][1 + i][j];
+      const valEl = document.getElementById("vc-vendor-" + i + "-" + j);
+      const pctEl = document.getElementById("vc-pct-vendor-" + i + "-" + j);
+      if (valEl) valEl.textContent = _vcFmt(val);
+      if (pctEl) pctEl.textContent = _vcFmtPct(val, ref);
+    }}
   }});
 }}
 window._pkAfterUpdate = _vcUpdateTable;
