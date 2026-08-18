@@ -148,6 +148,7 @@ def build_vendor_compare_html(
         if resolved_template_dir and phantom else None
     )
     ref_pts = []
+    ref_value_by_vial: dict[str, float] = {}
     if ref_config is not None:
         default_temp = ref_config.get("default_temp")
         temp_vals = ref_config.get("values_by_temp", {}).get(default_temp, {})
@@ -155,6 +156,7 @@ def build_vendor_compare_html(
             val = temp_vals.get(v.upper())
             if val is not None:
                 ref_pts.append({"x": j, "y": round(val, 4)})
+                ref_value_by_vial[v] = round(val, 4)
 
     # Row 0 = phantomkit, row 1 = vendor. Both get the full
     # mean/median/percentile treatment when real distribution data is
@@ -232,8 +234,15 @@ def build_vendor_compare_html(
         "errBounds": err_bounds,
     }
 
-    def _dataset(row: int, label: str, color: str, filled: bool) -> dict:
-        pts = [{"x": j, "y": round(float(mean_m[row, j]), 4)} for j in range(n)]
+    # Small horizontal offset so the two series don't sit exactly on top of
+    # each other at each vial's x position, which made them hard to
+    # distinguish when their values were close.
+    _X_OFFSET = 0.15
+
+    def _dataset(row: int, label: str, color: str, x_offset: float) -> dict:
+        pts = [
+            {"x": j + x_offset, "y": round(float(mean_m[row, j]), 4)} for j in range(n)
+        ]
         error_bars = {
             str(j): {
                 "yMin": round(float(mean_m[row, j] - std_m[row, j]), 4),
@@ -247,8 +256,8 @@ def build_vendor_compare_html(
             "data": pts,
             "errorBars": error_bars,
             "borderColor": color,
-            "backgroundColor": color if filled else "transparent",
-            "pointBackgroundColor": color if filled else "transparent",
+            "backgroundColor": color,
+            "pointBackgroundColor": color,
             "pointBorderColor": color,
             "pointBorderWidth": 2,
             "pointRadius": 6,
@@ -258,8 +267,8 @@ def build_vendor_compare_html(
         }
 
     datasets = [
-        _dataset(0, "phantomkit", _PHANTOMKIT_COLOR, filled=True),
-        _dataset(1, "Vendor", _VENDOR_COLOR, filled=False),
+        _dataset(0, "phantomkit", _PHANTOMKIT_COLOR, x_offset=-_X_OFFSET),
+        _dataset(1, "Vendor", _VENDOR_COLOR, x_offset=_X_OFFSET),
     ]
     if ref_pts:
         # Static overlay, not part of the _row/PK_DATA measure system — the
@@ -312,6 +321,52 @@ def build_vendor_compare_html(
             "Vendor series moves with the Mean/Median toggle."
         )
 
+    # ------------------------------------------------------------------
+    # Per-vial comparison table: reference / vendor / phantomkit values and
+    # each series' percentage difference from the reference value. Static
+    # cells are seeded with the initial (mean) values and refreshed by
+    # _pkAfterUpdate whenever the Mean/Median toggle changes.
+    # ------------------------------------------------------------------
+    def _fmt(v: float | None) -> str:
+        return "—" if v is None else f"{v:.4g}"
+
+    def _fmt_pct(v: float | None, ref: float | None) -> str:
+        if v is None or ref is None or ref == 0:
+            return "—"
+        return f"{(v - ref) / ref * 100:+.1f}%"
+
+    table_rows = ""
+    for j, v in enumerate(vials):
+        ref_val = ref_value_by_vial.get(v)
+        pk_val = float(mean_m[0, j])
+        vendor_val = float(mean_m[1, j])
+        table_rows += (
+            f'    <tr>'
+            f'<td>{v}</td>'
+            f'<td id="vc-ref-{j}">{_fmt(ref_val)}</td>'
+            f'<td id="vc-vendor-{j}">{_fmt(vendor_val)}</td>'
+            f'<td id="vc-pk-{j}">{_fmt(pk_val)}</td>'
+            f'<td id="vc-pct-vendor-{j}">{_fmt_pct(vendor_val, ref_val)}</td>'
+            f'<td id="vc-pct-pk-{j}">{_fmt_pct(pk_val, ref_val)}</td>'
+            f'</tr>\n'
+        )
+
+    table_html = f"""<div class="stats-section">
+  <div class="stats-title">Per-vial comparison vs reference</div>
+  <table class="stats-table">
+    <thead>
+      <tr><th>Vial</th><th>Reference</th><th>Vendor</th><th>phantomkit</th><th>&Delta; Vendor</th><th>&Delta; phantomkit</th></tr>
+    </thead>
+    <tbody>
+{table_rows}    </tbody>
+  </table>
+  <p style="font-size:11px;color:var(--text2);margin-top:8px;">
+    &Delta; columns are percentage difference from the reference value. Table follows the Mean/Median toggle above.
+  </p>
+</div>"""
+
+    ref_values_json = json.dumps([ref_value_by_vial.get(v) for v in vials])
+
     datasets_json = json.dumps(datasets)
     vials_json = json.dumps(vials)
     pk_data_json = json.dumps(pk_data)
@@ -337,16 +392,43 @@ def build_vendor_compare_html(
   </p>
 </div>
 
+{table_html}
+
 {data_tag}
 
 <script>
 const VIALS = {vials_json};
 const DATASETS = {datasets_json};
 const PK_DATA = {pk_data_json};
+const VC_REF_VALUES = {ref_values_json};
 
 {ERROR_BAR_PLUGIN_JS}
 {PK_TOGGLE_JS}
 {opts_js}
+
+function _vcFmt(v) {{ return (v === null || v === undefined) ? "—" : String(Number(v.toPrecision(4))); }}
+function _vcFmtPct(v, ref) {{
+  if (v === null || v === undefined || ref === null || ref === undefined || ref === 0) return "—";
+  const pct = (v - ref) / ref * 100;
+  return (pct >= 0 ? "+" : "") + pct.toFixed(1) + "%";
+}}
+function _vcUpdateTable() {{
+  const m = window._pkMeasure;
+  VIALS.forEach((v, j) => {{
+    const pk = PK_DATA.measure[m][0][j];
+    const vendor = PK_DATA.measure[m][1][j];
+    const ref = VC_REF_VALUES[j];
+    const pkEl = document.getElementById("vc-pk-" + j);
+    const vendorEl = document.getElementById("vc-vendor-" + j);
+    const pctPkEl = document.getElementById("vc-pct-pk-" + j);
+    const pctVendorEl = document.getElementById("vc-pct-vendor-" + j);
+    if (pkEl) pkEl.textContent = _vcFmt(pk);
+    if (vendorEl) vendorEl.textContent = _vcFmt(vendor);
+    if (pctPkEl) pctPkEl.textContent = _vcFmtPct(pk, ref);
+    if (pctVendorEl) pctVendorEl.textContent = _vcFmtPct(vendor, ref);
+  }});
+}}
+window._pkAfterUpdate = _vcUpdateTable;
 
 const opts = baseOpts("Vial", {y_label_json});
 opts.scales.x.type = "linear";
