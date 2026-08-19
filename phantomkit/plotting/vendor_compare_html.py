@@ -352,6 +352,31 @@ def build_vendor_compare_html(
             "showLine": False,
         })
 
+    # Per-dataset show/hide toggle buttons, matching the Compare tab's
+    # session toggle pattern (compare_plots.py's pkToggleSession /
+    # pkToggleAllSessions) — a colored pill button per series plus a
+    # "Toggle all" button, independent of the Mean/Median/error-bar and
+    # reference-temperature controls above.
+    toggle_buttons_html = "".join(
+        f'<button id="vc-toggle-btn-{idx}" data-visible="1" onclick="_vcToggleDataset({idx},this)"'
+        f' style="display:inline-flex;align-items:center;gap:6px;padding:4px 12px;'
+        f'border-radius:99px;border:1.5px solid var(--border);background:var(--bg3);'
+        f'color:var(--text);font-size:12px;font-weight:500;cursor:pointer;user-select:none;'
+        f'transition:opacity .15s;">'
+        f'<span style="width:10px;height:10px;border-radius:50%;'
+        f'background:{ds.get("pointBorderColor") or ds.get("borderColor")};flex-shrink:0;"></span>'
+        f'{ds["label"]}</button>'
+        for idx, ds in enumerate(datasets)
+    )
+    toggle_controls_html = (
+        '<div style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:12px;">'
+        '<button onclick="_vcToggleAllDatasets()" '
+        'style="padding:4px 12px;border-radius:99px;border:1.5px solid var(--border);'
+        'background:var(--bg3);color:var(--text2);font-size:12px;font-weight:500;'
+        'cursor:pointer;user-select:none;transition:opacity .15s;">Toggle all</button>'
+        f'{toggle_buttons_html}</div>'
+    )
+
     # Only load/overlay the vials actually being compared — not every mask
     # in vial_segmentations/ (which may include vials irrelevant to this
     # map type), to keep the viewer's per-vial toggle list meaningful and
@@ -493,6 +518,7 @@ def build_vendor_compare_html(
 <div class="chart-card">
   <div class="chart-title">{title}</div>
   {temp_selector_html}
+  {toggle_controls_html}
   <div class="chart-wrap" style="height:420px"><canvas id="vendorCompareChart"></canvas></div>
   <p style="font-size:13px;color:var(--text2);margin-top:8px;">
     {footnote}
@@ -556,6 +582,32 @@ function _vcSetTemp(temp) {{
     chart.update("none");
   }}
   _vcUpdateTable();
+}}
+
+function _vcToggleDataset(idx, btn) {{
+  const ds = chart.data.datasets[idx];
+  ds.hidden = !ds.hidden;
+  btn.setAttribute("data-visible", ds.hidden ? "0" : "1");
+  btn.style.opacity = ds.hidden ? "0.35" : "1.0";
+  chart.update();
+}}
+
+function _vcToggleAllDatasets() {{
+  const n = DATASETS.length;
+  let anyHidden = false;
+  for (let i = 0; i < n; i++) {{
+    if (chart.data.datasets[i].hidden) {{ anyHidden = true; break; }}
+  }}
+  const makeVisible = anyHidden;
+  for (let i = 0; i < n; i++) {{
+    chart.data.datasets[i].hidden = !makeVisible;
+    const btn = document.getElementById("vc-toggle-btn-" + i);
+    if (btn) {{
+      btn.setAttribute("data-visible", makeVisible ? "1" : "0");
+      btn.style.opacity = makeVisible ? "1.0" : "0.35";
+    }}
+  }}
+  chart.update();
 }}
 
 const opts = baseOpts("Vial", {y_label_json});

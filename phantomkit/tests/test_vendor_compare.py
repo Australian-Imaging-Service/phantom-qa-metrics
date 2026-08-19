@@ -453,6 +453,14 @@ def test_build_vendor_compare_html_multi_vendor_datasets_and_offsets(
     assert 'id="vc-pct-vendor-0-0"' in html and 'id="vc-pct-vendor-1-0"' in html
     assert "<th>VendorA</th>" in html and "<th>VendorB</th>" in html
 
+    # One show/hide toggle button per dataset (index-aligned with DATASETS),
+    # plus a "Toggle all" button, matching the Compare tab's session-toggle
+    # pattern.
+    assert "_vcToggleAllDatasets()" in html
+    for idx in range(len(datasets)):
+        assert f'id="vc-toggle-btn-{idx}"' in html
+        assert f"_vcToggleDataset({idx},this)" in html
+
 
 def test_build_vendor_compare_html_mismatched_list_lengths_raises(
     tmp_path: Path,
