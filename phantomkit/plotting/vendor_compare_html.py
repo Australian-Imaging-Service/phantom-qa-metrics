@@ -585,10 +585,13 @@ function _vcSetTemp(temp) {{
 }}
 
 function _vcToggleDataset(idx, btn) {{
-  const ds = chart.data.datasets[idx];
-  ds.hidden = !ds.hidden;
-  btn.setAttribute("data-visible", ds.hidden ? "0" : "1");
-  btn.style.opacity = ds.hidden ? "0.35" : "1.0";
+  // Chart.js's official visibility API — not a raw ds.hidden mutation —
+  // so errorBarPlugin's own `meta.hidden` check (_html_common.py) picks
+  // it up too and hides that series' error bars along with its points.
+  const visible = chart.isDatasetVisible(idx);
+  chart.setDatasetVisibility(idx, !visible);
+  btn.setAttribute("data-visible", visible ? "0" : "1");
+  btn.style.opacity = visible ? "0.35" : "1.0";
   chart.update();
 }}
 
@@ -596,11 +599,11 @@ function _vcToggleAllDatasets() {{
   const n = DATASETS.length;
   let anyHidden = false;
   for (let i = 0; i < n; i++) {{
-    if (chart.data.datasets[i].hidden) {{ anyHidden = true; break; }}
+    if (!chart.isDatasetVisible(i)) {{ anyHidden = true; break; }}
   }}
   const makeVisible = anyHidden;
   for (let i = 0; i < n; i++) {{
-    chart.data.datasets[i].hidden = !makeVisible;
+    chart.setDatasetVisibility(i, makeVisible);
     const btn = document.getElementById("vc-toggle-btn-" + i);
     if (btn) {{
       btn.setAttribute("data-visible", makeVisible ? "1" : "0");

@@ -461,6 +461,13 @@ def test_build_vendor_compare_html_multi_vendor_datasets_and_offsets(
         assert f'id="vc-toggle-btn-{idx}"' in html
         assert f"_vcToggleDataset({idx},this)" in html
 
+    # Toggling must use Chart.js's official visibility API (setDatasetVisibility
+    # / isDatasetVisible), not a raw ds.hidden mutation — errorBarPlugin's own
+    # meta.hidden check (_html_common.py) only reacts to the official API, so
+    # a hidden dataset's error bars would otherwise keep rendering.
+    assert "chart.setDatasetVisibility(" in html
+    assert "chart.isDatasetVisible(" in html
+
 
 def test_build_vendor_compare_html_mismatched_list_lengths_raises(
     tmp_path: Path,
