@@ -1,0 +1,127 @@
+title: "PhantomKit MRI phantom QC"
+schema_version: "2.0"
+version: "0.1.0"
+base_image:
+  # phantomkit's own published image already has mrtrix3, FSL, ANTs,
+  # dcm2niix, and an editable install of phantomkit itself (with all of
+  # its own pydra/fileformats dependencies) — see docker/Dockerfile. Only
+  # the XNAT CS packages below need adding on top.
+  name: arkiev/phantomkit
+  package_manager: apt
+  tag: latest
+packages:
+  pip:
+    pydra2app:
+    frametree:
+    frametree-xnat:
+authors:
+  - name: Arkiev D'Souza
+    email: arkievdsouza@gmail.com
+docs:
+  info_url: "https://github.com/Australian-Imaging-Service/phantomkit"
+  description: |
+    End-to-end phantomkit MRI phantom QC for a fixed acquisition protocol:
+    DWI preprocessing (rpe_all — both forward and reverse phase-encode
+    volumes always provided), phantom QC in DWI space (per-vial ADC/FA
+    metrics), and native-contrast QC (T1/T2 relaxometry per-vial metrics
+    from a fixed 12-TI / 8-TE protocol). Outputs are bundled into one
+    directory: preprocessed DWI maps, and both stages' vial-segmentation
+    masks, metrics, template-space images, and HTML QC reports.
+commands:
+  preprocess:
+    task: phantomkit.xnat_workflow:PhantomKitXnatWorkflow
+    operates_on: medimage/session
+    sources:
+      T1w:
+        field: t1w
+        help: "MPRAGE anatomical, used both for DWI coregistration and native-contrast QC"
+      DWI:
+        field: dwi
+        help: "DWI, forward phase-encode (AP), full multi-volume acquisition"
+      RPE:
+        field: rpe
+        help: "DWI, reverse phase-encode (PA), full multi-volume acquisition (rpe_all — always provided, never optional for this fixed protocol)"
+      TI_50:
+        field: ti_50
+        help: "T1 mapping, inversion time 50ms"
+      TI_100:
+        field: ti_100
+        help: "T1 mapping, inversion time 100ms"
+      TI_150:
+        field: ti_150
+        help: "T1 mapping, inversion time 150ms"
+      TI_250:
+        field: ti_250
+        help: "T1 mapping, inversion time 250ms"
+      TI_500:
+        field: ti_500
+        help: "T1 mapping, inversion time 500ms"
+      TI_1000:
+        field: ti_1000
+        help: "T1 mapping, inversion time 1000ms"
+      TI_1500:
+        field: ti_1500
+        help: "T1 mapping, inversion time 1500ms"
+      TI_2000:
+        field: ti_2000
+        help: "T1 mapping, inversion time 2000ms"
+      TI_3000:
+        field: ti_3000
+        help: "T1 mapping, inversion time 3000ms"
+      TI_5000:
+        field: ti_5000
+        help: "T1 mapping, inversion time 5000ms"
+      TI_7500:
+        field: ti_7500
+        help: "T1 mapping, inversion time 7500ms"
+      TI_9970:
+        field: ti_9970
+        help: "T1 mapping, inversion time 9970ms"
+      TE_14:
+        field: te_14
+        help: "T2 mapping, echo time 14ms"
+      TE_20:
+        field: te_20
+        help: "T2 mapping, echo time 20ms"
+      TE_40:
+        field: te_40
+        help: "T2 mapping, echo time 40ms"
+      TE_80:
+        field: te_80
+        help: "T2 mapping, echo time 80ms"
+      TE_160:
+        field: te_160
+        help: "T2 mapping, echo time 160ms"
+      TE_320:
+        field: te_320
+        help: "T2 mapping, echo time 320ms"
+      TE_640:
+        field: te_640
+        help: "T2 mapping, echo time 640ms"
+      TE_1000:
+        field: te_1000
+        help: "T2 mapping, echo time 1000ms"
+    sinks:
+      phantomkit_out_dir:
+        field: out_dir
+        help: "DWI maps + Stage 2 (DWI-space) and Stage 3 (native-contrast) QC outputs, bundled into one directory"
+    parameters:
+      Phantom:
+        field: phantom
+        help: "Phantom name — must match a template_data/<name>/ subdirectory"
+      ReadoutTime:
+        field: readout_time
+        help: "Total readout time (s) of the DWI acquisition"
+        default: 0.05
+      EddyOptions:
+        field: eddy_options
+        help: "Extra options string passed to dwifslpreproc's eddy step"
+        default: " --slm=linear"
+    configuration: # Additional args passed to the task, not exposed as command inputs
+      template_data_root: /phantomkit_resources/template_data
+resources:
+  # Mounted from --resources-dir at build time (a directory whose own
+  # template_data/ subdirectory becomes this resource) rather than relying
+  # on the base image's own baked-in copy — mirrors the T1w pipeline's
+  # resources_dir/configuration pattern for FastSurfer/parcellation atlases.
+  template_data: /phantomkit_resources/template_data

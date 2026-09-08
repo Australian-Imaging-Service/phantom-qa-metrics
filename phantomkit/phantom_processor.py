@@ -36,6 +36,8 @@ from typing import Dict, List, Optional, Tuple
 import pandas as pd
 from pydra.compose import python, workflow
 from pydra.engine import Submitter
+from fileformats.medimage import NiftiGz
+from fileformats.generic import Directory
 
 
 # =============================================================================
@@ -1371,14 +1373,30 @@ def _task_cleanup(
     return "done"
 
 
+@python.define(outputs=["out_dir"])
+def _task_finalize_qc_dir(
+    output_dir_str: str,
+    sentinel: str,  # enforces Step 6 (cleanup) → finalize ordering; not used in body
+) -> Directory:
+    """Expose the session's output directory as a typed fileformats result.
+
+    ``vial_segmentations/``, ``metrics/``, ``images_template_space/``, and
+    the HTML report all already live under ``output_dir_str`` by the time
+    cleanup finishes — this just wraps that path as a ``Directory`` so
+    ``PhantomSessionWf`` returns a real pydra2app/frametree-xnat sink
+    instead of a discarded sentinel string.
+    """
+    return Directory(output_dir_str)
+
+
 # =============================================================================
 # Module-level Pydra workflow  (explicit parameters — no closure capture)
 # =============================================================================
 
 
-@workflow.define(outputs=["out"])
+@workflow.define(outputs=["out_dir"])
 def PhantomSessionWf(
-    input_image: str,
+    input_image: NiftiGz,
     template_phantom: str,
     vial_masks: list,
     adc_vials: list,
@@ -1387,21 +1405,29 @@ def PhantomSessionWf(
     session_name: str,
     phantom_name: str,
     template_dir_parent: str,
-    contrast_files: list,
+    contrast_files: list[NiftiGz],
     output_format: str = "html",
     filename_prefix: str = "",
     rayleigh_correction: bool = False,
     cpu_threads: int = 1,
     scan_date: str = "",
-) -> str:
+) -> Directory:
     """
     End-to-end phantom QC workflow.
 
     All inputs are passed explicitly (no closure) to avoid Pydra global
     registry collisions when the workflow is instantiated multiple times
     within the same Python process (e.g. Stage 2 + Stage 3 in parallel).
+
+    ``input_image``/``contrast_files`` are typed fileformats objects (so
+    this workflow can be wired via ``workflow.add()`` directly off other
+    typed pydra outputs, e.g. from ``DWISeriesWorkflow``) — converted to
+    plain strings immediately for the existing str-based internal tasks.
     """
     from pathlib import Path as _Path
+
+    _input_image_str = str(input_image)
+    _contrast_files_str = [str(c) for c in contrast_files]
 
     _output_dir = _Path(output_dir_str)
     _tmp_dir = _output_dir / "tmp"
@@ -1412,7 +1438,7 @@ def PhantomSessionWf(
     # Step 1: ANTs registration
     reg = workflow.add(
         _task_register(
-            input_image=input_image,
+            input_image=_input_image_str,
             template_phantom=template_phantom,
             output_prefix=output_prefix,
             cpu_threads=cpu_threads,
@@ -1433,7 +1459,7 @@ def PhantomSessionWf(
     vials = workflow.add(
         _task_transform_vials(
             vial_masks=vial_masks,
-            reference_image=input_image,
+            reference_image=_input_image_str,
             transform_matrix=reg.transform,
             output_vial_dir=str(_vial_dir),
             tmp_vial_dir=str(_output_dir / "tmp_vials"),
@@ -1444,7 +1470,7 @@ def PhantomSessionWf(
     # Step 3: Extract metrics (depends on vials via data)
     metrics = workflow.add(
         _task_extract_metrics(
-            contrast_files=contrast_files,
+            contrast_files=_contrast_files_str,
             vial_paths=vials.vial_paths,
             adc_vials=adc_vials,
             output_metrics_dir=str(_metrics_dir),
@@ -1457,7 +1483,7 @@ def PhantomSessionWf(
     # Step 4: Generate plots (depends on metrics via sentinel)
     plots = workflow.add(
         _task_generate_plots(
-            contrast_files=contrast_files,
+            contrast_files=_contrast_files_str,
             metrics_dir=str(_metrics_dir),
             vial_dir=str(_vial_dir),
             session_name=session_name,
@@ -1476,7 +1502,7 @@ def PhantomSessionWf(
     # (depends on reg via data; runs in parallel with Steps 2–4)
     template_contrasts = workflow.add(
         _task_transform_contrasts(
-            contrast_files=contrast_files,
+            contrast_files=_contrast_files_str,
             transform_matrix=reg.transform,
             template_phantom=template_phantom,
             output_dir=str(_images_dir),
@@ -1500,12 +1526,64 @@ def PhantomSessionWf(
         name="cleanup",
     )
 
-    return cleanup.out
+    # Step 7: Expose the output directory as a typed fileformats result
+    # (depends on cleanup via sentinel, so it runs only after everything
+    # else has finished and settled).
+    finalize = workflow.add(
+        _task_finalize_qc_dir(
+            output_dir_str=output_dir_str,
+            sentinel=cleanup.out,
+        ),
+        name="finalize",
+    )
+
+    return finalize.out_dir
 
 
 # =============================================================================
 # PhantomProcessor
 # =============================================================================
+
+
+def resolve_phantom_template(template_dir: Path) -> dict:
+    """Resolve a phantom's template assets from its ``template_data/<phantom>/`` dir.
+
+    Shared by ``PhantomProcessor.__init__`` (legacy CLI path) and
+    ``phantomkit.xnat_workflow.PhantomKitXnatWorkflow`` (XNAT CS path) so
+    both derive ``template_phantom``/``vial_masks``/``adc_vials`` the exact
+    same way, from the exact same ``phantom: str`` -> ``template_dir``
+    resolution.
+
+    Returns ``{"phantom_name", "template_phantom", "vial_masks", "adc_vials"}``.
+    Raises ``FileNotFoundError`` if the template/vial masks/ADC calibration
+    data are missing.
+    """
+    from phantomkit.plotting._calibration_reference import load_calibration_reference
+
+    phantom_name = template_dir.name
+    template_phantom = template_dir / "ImageTemplate.nii.gz"
+    vial_dir = template_dir / "VialsLabelled"
+    vial_masks = sorted(vial_dir.glob("*.nii.gz"))
+
+    adc_cal = load_calibration_reference(str(template_dir.parent), phantom_name, "ADC")
+    if adc_cal is None:
+        raise FileNotFoundError(
+            f"ADC calibration data not found for phantom '{phantom_name}' "
+            f"in {template_dir.parent}"
+        )
+    adc_vials = {v.upper() for v in adc_cal["vials"]}
+
+    if not template_phantom.exists():
+        raise FileNotFoundError(f"Template not found: {template_phantom}")
+    if len(vial_masks) == 0:
+        raise FileNotFoundError(f"No vial masks found in: {vial_dir}")
+
+    return {
+        "phantom_name": phantom_name,
+        "template_phantom": template_phantom,
+        "vial_masks": vial_masks,
+        "adc_vials": adc_vials,
+    }
 
 
 class PhantomProcessor:
@@ -1541,29 +1619,12 @@ class PhantomProcessor:
         self.n_threads = n_threads if n_threads is not None else (os.cpu_count() or 1)
         self.scan_date = scan_date or ""
 
-        # Phantom name is the last component of template_dir (e.g. "SPIRIT")
-        self.phantom_name = self.template_dir.name
-
-        self.template_phantom = self.template_dir / "ImageTemplate.nii.gz"
+        resolved = resolve_phantom_template(self.template_dir)
+        self.phantom_name = resolved["phantom_name"]
+        self.template_phantom = resolved["template_phantom"]
         self.vial_dir = self.template_dir / "VialsLabelled"
-        self.vial_masks = sorted(self.vial_dir.glob("*.nii.gz"))
-
-        # Load ADC vials from the calibration xlsx via phantom_config.json
-        from phantomkit.plotting._calibration_reference import load_calibration_reference
-        _adc_cal = load_calibration_reference(
-            str(self.template_dir.parent), self.phantom_name, "ADC"
-        )
-        if _adc_cal is None:
-            raise FileNotFoundError(
-                f"ADC calibration data not found for phantom '{self.phantom_name}' "
-                f"in {self.template_dir.parent}"
-            )
-        self.adc_vials = {v.upper() for v in _adc_cal["vials"]}
-
-        if not self.template_phantom.exists():
-            raise FileNotFoundError(f"Template not found: {self.template_phantom}")
-        if len(self.vial_masks) == 0:
-            raise FileNotFoundError(f"No vial masks found in: {self.vial_dir}")
+        self.vial_masks = resolved["vial_masks"]
+        self.adc_vials = resolved["adc_vials"]
 
     def process_session(
         self,
@@ -1625,7 +1686,7 @@ class PhantomProcessor:
         )
 
         wf = PhantomSessionWf(
-            input_image=input_image,
+            input_image=NiftiGz(input_image),
             template_phantom=str(self.template_phantom),
             vial_masks=[str(m) for m in self.vial_masks],
             adc_vials=sorted(self.adc_vials),
@@ -1634,7 +1695,7 @@ class PhantomProcessor:
             session_name=session_name,
             phantom_name=self.phantom_name,
             template_dir_parent=str(self.template_dir.parent),
-            contrast_files=contrast_files,
+            contrast_files=[NiftiGz(f) for f in contrast_files],
             output_format=self.output_format,
             filename_prefix=self.filename_prefix,
             rayleigh_correction=self.rayleigh_correction,
