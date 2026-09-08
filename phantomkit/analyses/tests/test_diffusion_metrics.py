@@ -6,6 +6,7 @@ import nibabel as nib
 import numpy as np
 import pytest
 
+from fileformats.text import TextFile
 from fileformats.medimage import NiftiGz, Bval, Bvec
 from fileformats.vendor.mrtrix3.medimage import ImageFormat as Mif
 
@@ -91,7 +92,6 @@ def acqparams_file(tmp_path: Path) -> Path:
 # ============================================================================
 
 
-@pytest.mark.xfail
 def test_prepare_output_dirs_creates_all_dirs(tmp_path: Path) -> None:
     session_dir = tmp_path / "session01"
     session_dir.mkdir()
@@ -119,7 +119,6 @@ def test_prepare_output_dirs_creates_all_dirs(tmp_path: Path) -> None:
         assert Path(getattr(out, attr)).exists(), f"{attr} not created"
 
 
-@pytest.mark.xfail
 def test_prepare_output_dirs_default_base(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(tmp_path)
     session_dir = tmp_path / "sess"
@@ -373,15 +372,14 @@ def test_write_eddy_files_acqparams_ap_only(
 # ============================================================================
 
 
-@pytest.mark.xfail
 def test_unpack_grad_fsl_separates_tuple() -> None:
     bvec = Bvec.sample()
     bval = Bval.sample()
 
     out = _UnpackGradFsl(grad_fsl=(bvec, bval))()
 
-    assert Path(out.bvecs_file) == bvec
-    assert Path(out.bvals_file) == bval
+    assert out.bvecs_file != bvec
+    assert out.bvecs_file.hash() == bvec.hash()
 
 
 # ============================================================================
@@ -614,7 +612,6 @@ def _dummy_file(tmp_path: Path, name: str = "dummy.nii.gz") -> Path:
     return p
 
 
-@pytest.mark.xfail
 def test_create_phantom_mask_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import CreatePhantomMask
 
@@ -622,7 +619,6 @@ def test_create_phantom_mask_build(tmp_path: Path) -> None:
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_prepare_topup_data_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import PrepareTopupData
 
@@ -634,21 +630,19 @@ def test_prepare_topup_data_build(tmp_path: Path) -> None:
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_apply_topup_to_dwi_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import ApplyTopupToDwi
 
     wf = ApplyTopupToDwi(
         dwi_mif=Mif.sample(),
-        topup_fieldcoef=_dummy_file(tmp_path, "fieldcoef.nii.gz"),
-        topup_movpar=_dummy_file(tmp_path, "movpar.txt"),
-        acqparams_file=_dummy_file(tmp_path, "acqparams.txt"),
+        topup_fieldcoef=NiftiGz.sample(),
+        topup_movpar=TextFile.sample(),
+        acqparams_file=TextFile.sample(),
         topup_dir=tmp_path,
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_filter_bvalue_shells_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import FilterBvalueShells
 
@@ -656,38 +650,37 @@ def test_filter_bvalue_shells_build(tmp_path: Path) -> None:
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_prepare_eddy_inputs_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import PrepareEddyInputs
 
     wf = PrepareEddyInputs(
         dwi_mif=Mif.sample(),
-        topup_acqparams=_dummy_file(tmp_path, "acqparams.txt"),
+        topup_acqparams=TextFile.sample(),
         eddy_dir=tmp_path,
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_convert_eddy_output_to_mif_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import ConvertEddyOutputToMif
 
+    bvecs = Bvec.sample()
+
     wf = ConvertEddyOutputToMif(
-        eddy_nii=_dummy_file(tmp_path, "eddy.nii.gz"),
-        rotated_bvecs=_dummy_file(tmp_path, "bvecs"),
-        bvals_file=_dummy_file(tmp_path, "bvals"),
+        eddy_nii=NiftiGz.sample(),
+        rotated_bvecs=Path(bvecs),
+        bvals_file=bvecs.b_values_file,
         output_mif=tmp_path / "out.mif",
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_compute_adc_maps_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import ComputeAdcMaps
 
     wf = ComputeAdcMaps(
         dwi_mif=Mif.sample(),
-        phantom_mask=_dummy_file(tmp_path, "mask.nii.gz"),
+        phantom_mask=NiftiGz.sample(),
         output_dir=tmp_path,
         label="test",
         shells=[1000.0, 2000.0],
@@ -695,7 +688,6 @@ def test_compute_adc_maps_build(tmp_path: Path) -> None:
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_topup_correction_step_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import TopupCorrectionStep
 
@@ -707,22 +699,20 @@ def test_topup_correction_step_build(tmp_path: Path) -> None:
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_eddy_correction_step_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import EddyCorrectionStep
 
     wf = EddyCorrectionStep(
         dwi_mif=Mif.sample(),
-        phantom_mask=_dummy_file(tmp_path, "mask.nii.gz"),
-        topup_fieldcoef=_dummy_file(tmp_path, "fieldcoef.nii.gz"),
-        topup_movpar=_dummy_file(tmp_path, "movpar.txt"),
-        topup_acqparams=_dummy_file(tmp_path, "acqparams.txt"),
+        phantom_mask=Mif.sample(seed=0),
+        topup_fieldcoef=Mif.sample(seed=1),
+        topup_movpar=TextFile.sample(),
+        topup_acqparams=TextFile.sample(),
         eddy_dir=tmp_path,
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_cumulative_pipeline_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import CumulativeDwiPipeline
 
@@ -730,17 +720,18 @@ def test_cumulative_pipeline_build(tmp_path: Path) -> None:
     session_dir.mkdir()
     image = NiftiGz.sample(dest_dir=session_dir, stem="dwi")
 
+    bvecs = Bvec.sample()
+
     wf = CumulativeDwiPipeline(
         input_image=image,
-        bvals_file=_dummy_file(tmp_path, "bvals"),
-        bvecs_file=_dummy_file(tmp_path, "bvecs"),
+        bvecs_file=Path(bvecs),
+        bvals_file=bvecs.b_values_file,
         pa_ref_dir=tmp_path,
         output_base_dir=tmp_path / "output",
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_isolated_pipeline_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import IsolatedDwiPipeline
 
@@ -748,18 +739,19 @@ def test_isolated_pipeline_build(tmp_path: Path) -> None:
     session_dir.mkdir()
     image = NiftiGz.sample(dest_dir=session_dir, stem="dwi")
 
+    bvecs = Bvec.sample()
+
     wf = IsolatedDwiPipeline(
         input_image=image,
-        bvals_file=_dummy_file(tmp_path, "bvals"),
-        bvecs_file=_dummy_file(tmp_path, "bvecs"),
+        bvecs_file=Path(bvecs),
+        bvals_file=bvecs.b_values_file,
         pa_ref_dir=tmp_path,
-        phantom_mask=_dummy_file(tmp_path, "mask.nii.gz"),
+        phantom_mask=Mif.sample(),
         output_base_dir=tmp_path / "output",
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_diffusion_metrics_analysis_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import DiffusionMetricsAnalysis
 
@@ -767,17 +759,18 @@ def test_diffusion_metrics_analysis_build(tmp_path: Path) -> None:
     session_dir.mkdir()
     image = NiftiGz.sample(dest_dir=session_dir, stem="dwi")
 
+    bvecs = Bvec.sample()
+
     wf = DiffusionMetricsAnalysis(
         input_image=image,
-        bvals_file=_dummy_file(tmp_path, "bvals"),
-        bvecs_file=_dummy_file(tmp_path, "bvecs"),
+        bvecs_file=Path(bvecs),
+        bvals_file=bvecs.b_values_file,
         pa_ref_dir=tmp_path,
         output_base_dir=tmp_path / "output",
     )
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_diffusion_metrics_analysis_batch_build(tmp_path: Path) -> None:
     from phantomkit.analyses.diffusion_metrics import DiffusionMetricsAnalysisBatch
 
@@ -795,7 +788,6 @@ def test_diffusion_metrics_analysis_batch_build(tmp_path: Path) -> None:
     assert wf is not None
 
 
-@pytest.mark.xfail
 def test_compute_adc_maps_varying_shells_build(tmp_path: Path) -> None:
     """ComputeAdcMaps builds successfully with different shell counts."""
     from phantomkit.analyses.diffusion_metrics import ComputeAdcMaps

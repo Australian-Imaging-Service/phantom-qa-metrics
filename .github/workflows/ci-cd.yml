@@ -25,6 +25,7 @@ jobs:
         shell: bash -l {0}
     env:
       PIP_BREAK_SYSTEM_PACKAGES: 1
+      MRTRIX3_VERSION: "3.0.4"
     steps:
     - name: Checkout
       uses: actions/checkout@v2
@@ -36,6 +37,21 @@ jobs:
       run: git fetch --prune --unshallow
     - name: Disable etelemetry
       run:  echo "NO_ET=TRUE" >> $GITHUB_ENV
+    - name: Install Neurocommand
+      run: |
+        git clone https://github.com/NeuroDesk/neurocommand.git
+        pushd neurocommand
+        pip3 install -r neurodesk/requirements.txt --user
+        bash build.sh --cli
+        echo "APPTAINER_BINDPATH=`pwd -P`" >> $GITHUB_ENV
+
+        source /etc/profile.d/lmod.sh
+        ./containers.sh "mrtrix3" | grep -E "^\s*\|\s*mrtrix3\s*\|\s*${{ env.MRTRIX3_VERSION }}\s*\|" | awk -F '|' '{gsub(/ /,"",$4); print $4}'
+        SCIGET_BUILDVERSION=$(./containers.sh "mrtrix3" | grep -E "^\s*\|\s*mrtrix3\s*\|\s*${{ env.MRTRIX3_VERSION }}\s*\|" | awk -F '|' '{gsub(/ /,"",$4); print $4}')
+
+        ./local/fetch_containers.sh mrtrix3 ${{ env.MRTRIX3_VERSION }} $SCIGET_BUILDVERSION
+        echo "SCIGET_BUILDVERSION=$SCIGET_BUILDVERSION" >> $GITHUB_ENV
+        popd
     - name: Set up Python ${{ matrix.python-version }} on ${{ matrix.os }}
       uses: actions/setup-python@v2
       with:
