@@ -28,18 +28,14 @@ dependencies = [
 authors = [
     { name = "Thomas G. Close", email = "tom.g.close@gmail.com" },
     { name = "Hugh McCloskey", email = "Hugh.Mccloskey@sahmri.com" },
-    { name = "Arkiev D'Souza", email = "arkiev.dsouza@sydney.edu.au" }
+    { name = "Arkiev D'Souza", email = "arkiev.dsouza@sydney.edu.au" },
 ]
 maintainers = [
     { name = "Thomas G. Close", email = "tom.g.close@gmail.com" },
     { name = "Hugh McCloskey", email = "Hugh.Mccloskey@sahmri.com" },
-    { name = "Arkiev D'Souza", email = "arkiev.dsouza@sydney.edu.au" }
+    { name = "Arkiev D'Souza", email = "arkiev.dsouza@sydney.edu.au" },
 ]
-keywords = [
-    "MRI",
-    "phantom",
-    "analysis",
-]
+keywords = ["MRI", "phantom", "analysis"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -105,7 +101,6 @@ exclude = ["tests"]
 include = ["./phantomkit"]
 
 [tool.mypy]
-python_version = "3.11"
 ignore_missing_imports = true
 strict = true
 namespace_packages = true
