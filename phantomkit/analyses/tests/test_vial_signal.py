@@ -2,7 +2,6 @@
 
 from pathlib import Path
 
-from fileformats.generic import File
 from fileformats.medimage import NiftiGz
 
 from phantomkit.analyses.vial_signal import (
@@ -89,13 +88,11 @@ def test_vial_signal_build(tmp_path: Path) -> None:
     image = NiftiGz.sample(dest_dir=tmp_path, stem="t1")
     template_dir = tmp_path / "template"
     template_dir.mkdir()
-    rotation_lib = File.sample(dest_dir=tmp_path, stem="rotations")
 
     wf = VialSignalAnalysis(
         input_image=image,
         template_dir=template_dir,
         output_base_dir=tmp_path / "output",
-        rotation_library_file=rotation_lib,
     )
     assert wf is not None
 
@@ -108,12 +105,10 @@ def test_vial_signal_batch_build(tmp_path: Path) -> None:
     ]
     template_dir = tmp_path / "template"
     template_dir.mkdir()
-    rotation_lib = File.sample(dest_dir=tmp_path, stem="rotations")
 
     wf = VialSignalAnalysisBatch(
         input_images=images,
         template_dir=template_dir,
         output_base_dir=tmp_path / "output",
-        rotation_library_file=rotation_lib,
     )
     assert wf is not None

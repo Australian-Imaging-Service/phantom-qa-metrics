@@ -75,8 +75,6 @@ def test_transform_vials_to_subject_space_builds(tmp_path: Path) -> None:
         vial_masks=[vial],
         reference_image=ref,
         transform_matrix=affine,
-        rotation_matrix_file=None,
-        iteration=1,
         output_vial_dir=tmp_path / "vials",
     )
     assert wf is not None
@@ -99,8 +97,6 @@ def test_transform_contrasts_to_template_space_builds_empty(tmp_path: Path) -> N
     wf = TransformContrastsToTemplateSpace(
         contrast_files=[],
         transform_matrix=affine,
-        rotation_matrix_file=None,
-        iteration=1,
         template_phantom=template,
         tmp_dir=tmp_path / "tmp",
         output_dir=tmp_path / "output",

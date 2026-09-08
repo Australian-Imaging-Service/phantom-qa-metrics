@@ -21,8 +21,11 @@ dependencies = [
     "pydra-tasks-ants",
     "pydra-tasks-fsl",
     "pydra-tasks-mrtrix3",
+    "openpyxl >=3.0",
     "scipy >=1.10.0",
     "typing_extensions >=4.6.3; python_version < '4.0'",
+    "fastapi >=0.100",
+    "uvicorn[standard] >=0.23",
 ]
 
 authors = [
@@ -82,6 +85,7 @@ docs = [
 
 [project.scripts]
 phantomkit = "phantomkit.cli:main"
+phantomkit-gui = "phantomkit.gui:main"
 
 [project.urls]
 repository = "https://github.com/Australian-Imaging-Service/phantomkit"
@@ -89,6 +93,7 @@ repository = "https://github.com/Australian-Imaging-Service/phantomkit"
 
 [tool.hatch.version]
 source = "vcs"
+fallback-version = "0.0.0"
 
 [tool.hatch.build.hooks.vcs]
 version-file = "phantomkit/_version.py"

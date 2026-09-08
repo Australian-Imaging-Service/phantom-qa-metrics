@@ -3,6 +3,8 @@
 import importlib
 import logging
 import pkgutil
+import shutil
+import subprocess
 from pathlib import Path
 from typing import get_args, get_origin
 
@@ -16,6 +18,18 @@ logger = logging.getLogger(__name__)
 # Fields that are internal to pydra or used for input routing
 _SKIP_FIELDS = frozenset({"constructor"})
 _INPUT_FIELD_NAMES = frozenset({"input_image", "input_images"})
+
+
+def _format_exc(exc: BaseException) -> str:
+    """Format an exception for display, including captured subprocess
+    stderr — CalledProcessError's default str() only shows the command
+    and exit code, silently dropping the actual error output."""
+    if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+        stderr = exc.stderr
+        if isinstance(stderr, bytes):
+            stderr = stderr.decode(errors="replace")
+        return f"{exc}\n{stderr.strip()}"
+    return str(exc)
 
 
 # ---------------------------------------------------------------------------
@@ -36,7 +50,11 @@ def _discover_protocols() -> dict[str, tuple]:
     for info in pkgutil.iter_modules(phantomkit.analyses.__path__):
         if info.name.startswith("_"):
             continue
-        mod = importlib.import_module(f"phantomkit.analyses.{info.name}")
+        try:
+            mod = importlib.import_module(f"phantomkit.analyses.{info.name}")
+        except Exception as exc:
+            logger.debug("Skipping protocol module %s: %s", info.name, exc)
+            continue
         for attr_name, obj in vars(mod).items():
             if attr_name.startswith("_") or not attr_name.endswith("Analysis"):
                 continue
@@ -124,7 +142,7 @@ def _build_command(slug: str, single_cls, batch_cls) -> click.Command:
 
     def _callback(**kwargs):
         input_val: str = kwargs.pop("input")
-        plugin: str = kwargs.pop("plugin")
+        worker: str = kwargs.pop("worker")
         pattern: str = kwargs.pop("pattern")
         # Convert click tuples (from multiple=True) to lists
         wf_kwargs = {
@@ -161,7 +179,7 @@ def _build_command(slug: str, single_cls, batch_cls) -> click.Command:
 
         from pydra.engine import Submitter
 
-        with Submitter(plugin=plugin) as sub:
+        with Submitter(worker=worker) as sub:
             sub(wf)
         logger.info("Done.")
 
@@ -189,11 +207,11 @@ def _build_command(slug: str, single_cls, batch_cls) -> click.Command:
     # Common options
     click_params += [
         click.Option(
-            ["--plugin"],
-            type=click.Choice(["cf", "serial"]),
+            ["--worker"],
+            type=click.Choice(["cf", "debug"]),
             default="cf",
             show_default=True,
-            help="Pydra execution plugin.",
+            help="Pydra worker type. 'cf' = concurrent futures (default). 'debug' = single-threaded with full tracebacks.",
         ),
         click.Option(
             ["--pattern"],
@@ -291,7 +309,11 @@ def _register_plot_commands() -> None:
     for info in pkgutil.iter_modules(_pkg.__path__):
         if info.name.startswith("_"):
             continue
-        mod = importlib.import_module(f"phantomkit.plotting.{info.name}")
+        try:
+            mod = importlib.import_module(f"phantomkit.plotting.{info.name}")
+        except Exception as exc:
+            logger.debug("Skipping plot module %s: %s", info.name, exc)
+            continue
         cmd = getattr(mod, "main", None)
         if isinstance(cmd, (click.Command, click.Group)):
             plot.add_command(cmd, name=info.name.replace("_", "-"))
@@ -301,5 +323,565 @@ _register_commands()
 _register_plot_commands()
 
 
-if __name__ == "__main__":
-    main()
+# ---------------------------------------------------------------------------
+# GUI command — CustomTkinter launcher
+# ---------------------------------------------------------------------------
+
+
+@main.command("gui")
+def launch_gui() -> None:
+    """Launch the PhantomKit graphical user interface."""
+    import subprocess
+    import sys
+    from pathlib import Path as _Path
+    gui_script = _Path(__file__).parent / "gui.py"
+    subprocess.run([sys.executable, str(gui_script)], check=False)
+
+
+# ---------------------------------------------------------------------------
+# View command — NiceGUI MRI viewer
+# ---------------------------------------------------------------------------
+
+
+@main.command("view")
+@click.argument("nifti_image", metavar="NIFTI")
+@click.option(
+    "--vials",
+    "vials_dir",
+    default=None,
+    metavar="DIR",
+    help="Directory containing vial ROI NIfTI masks (.nii.gz).",
+)
+@click.option("--title", default="MRI Viewer", show_default=True)
+@click.option(
+    "--port", default=8080, show_default=True, help="TCP port for the NiceGUI server."
+)
+def view_mri(nifti_image: str, vials_dir: str | None, title: str, port: int) -> None:
+    """Launch an interactive MRI viewer for a NIfTI image.
+
+    NIFTI is the path to the background .nii or .nii.gz file.
+
+    Use --vials to specify a directory of vial ROI masks that can be
+    toggled on/off as overlays.
+    """
+    from phantomkit.plotting.viewer import launch_viewer
+
+    vial_niftis: dict[str, str] = {}
+    if vials_dir:
+        vials_path = Path(vials_dir)
+        for p in sorted(vials_path.glob("*.nii.gz")):
+            name = p.name.replace(".nii.gz", "").replace(".nii", "")
+            vial_niftis[name] = str(p)
+
+    launch_viewer(
+        nifti_image=nifti_image,
+        vial_niftis=vial_niftis or None,
+        title=title,
+        port=port,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Pipeline command — end-to-end phantom QC + DWI orchestrator
+# ---------------------------------------------------------------------------
+
+
+@main.command("pipeline")
+@click.option(
+    "--input-dir",
+    required=True,
+    help="Root directory containing acquisition subdirectories (DICOM folders).",
+)
+@click.option(
+    "--output-dir",
+    required=True,
+    help="Top-level output directory. All results are written here.",
+)
+@click.option(
+    "--phantom",
+    required=True,
+    help="Phantom name, e.g. SPIRIT. Used to locate template_data/<phantom>/.",
+)
+@click.option(
+    "--processing-steps",
+    default="",
+    help=(
+        "Comma-separated DWI processing steps to run. "
+        "Valid values: gradcheck, dwidenoise, mrgibbs, dwifslpreproc, dwibiascorrect. "
+        "Example: --processing-steps dwidenoise,mrgibbs,dwifslpreproc,dwibiascorrect. "
+        "Default: none (only tensor fitting is performed)."
+    ),
+)
+@click.option(
+    "--nocleanup",
+    is_flag=True,
+    default=False,
+    help="Keep DWI tmp/ intermediate directories.",
+)
+@click.option(
+    "--readout-time",
+    type=float,
+    default=None,
+    help="Override TotalReadoutTime (seconds) for dwifslpreproc.",
+)
+@click.option(
+    "--eddy-options",
+    type=str,
+    default=None,
+    help="Override FSL eddy options string.",
+)
+@click.option(
+    "--worker",
+    type=click.Choice(["cf", "debug"]),
+    default="cf",
+    show_default=True,
+    help="Pydra worker type. 'cf' = concurrent futures (default). 'debug' = single-threaded with full tracebacks.",
+)
+@click.option(
+    "--dry-run",
+    is_flag=True,
+    default=False,
+    help="Plan and print commands; do not execute any processing.",
+)
+def run_pipeline(
+    input_dir,
+    output_dir,
+    phantom,
+    processing_steps,
+    nocleanup,
+    readout_time,
+    eddy_options,
+    worker,
+    dry_run,
+):
+    """Run the end-to-end phantom QC + DWI processing pipeline.
+
+    Scans INPUT_DIR for acquisition subdirectories (DICOM folders), classifies
+    DWI and T1 series, builds typed scan objects, then submits one
+    ``PhantomKitWorkflow`` per DWI series via pydra.  Native contrast phantom
+    QC (Stage 3) continues to use the legacy ``pipeline.py`` path until
+    ``PhantomSessionWf`` gains typed file outputs for direct workflow
+    integration.
+    """
+    # PET uses its own dedicated stage — bypass all DWI/MRtrix imports.
+    if phantom == "PET":
+        from phantomkit.pipeline import run_full_pipeline
+        run_full_pipeline(
+            input_dir=Path(input_dir).resolve(),
+            output_dir=Path(output_dir).resolve(),
+            phantom=phantom,
+            dry_run=dry_run,
+        )
+        return
+
+    import subprocess
+    import concurrent.futures
+    import threading
+
+    from fileformats.medimage import NiftiGz
+    from fileformats.vendor.mrtrix3.medimage import ImageFormatGz
+    from pydra.engine import Submitter
+
+    from phantomkit.pipeline import (
+        validate_inputs,
+        run_stage2,
+        run_stage3,
+        scan_input_dir,
+        print_header,
+        TEMPLATE_DATA_ROOT,
+        _stage_input,
+        _cleanup_staged_input,
+    )
+    from phantomkit.dwi_processing import (
+        scan_directory,
+        convert_all_candidates,
+        classify_candidates,
+        match_ap_pa_pairs,
+        build_pe_assignment_map,
+        plan_workflow,
+        print_plan,
+        convert_series_to_nii,
+    )
+    from phantomkit.pydra_workflow import PhantomKitWorkflow
+
+    input_path = Path(input_dir).resolve()
+    output_path = Path(output_dir).resolve()
+    template_dir = TEMPLATE_DATA_ROOT / phantom
+
+    validate_inputs(input_path, phantom)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    import os as _os
+    n_threads = _os.cpu_count() or 1
+    _os.environ.setdefault("ITK_GLOBAL_DEFAULT_NUMBER_OF_THREADS", str(n_threads))
+
+    _valid_steps = {"dwidenoise", "mrgibbs", "dwifslpreproc", "dwibiascorrect", "gradcheck"}
+    _parsed_steps = [s.strip() for s in processing_steps.split(",") if s.strip()]
+    _invalid = [s for s in _parsed_steps if s not in _valid_steps]
+    if _invalid:
+        raise click.UsageError(
+            f"Unknown --processing-steps value(s): {', '.join(_invalid)}. "
+            f"Valid options: {', '.join(sorted(_valid_steps))}"
+        )
+
+    cfg = {
+        "scans_dir": str(input_path),
+        "output_dir": str(output_path),
+        "processing_steps": _parsed_steps,
+        "gradcheck": "gradcheck" in _parsed_steps,
+        "keep_tmp": nocleanup,
+        "readout_time": readout_time,
+        "eddy_options": eddy_options or " --slm=linear",
+    }
+
+    # ── Stage flat NIfTI/MIF files, or a foreign DICOM dump, if needed ──────────
+    effective_input = _stage_input(input_path, output_path)
+
+    # ── Directory scan & series classification ───────────────────────────────
+    print_header("Input Directory Scan")
+    dirs = scan_directory(str(effective_input))
+    scan_info = scan_input_dir(effective_input)
+
+    has_dwi = bool(dirs["candidate_dwi"])
+    has_native = bool(scan_info.get("mprage_dirs")) and (
+        scan_info.get("has_native_contrasts") or not has_dwi
+    )
+
+    # ── DWI processing (Stages 1+2) ──────────────────────────────────────────
+    dwi_output_dirs: list[Path] = []
+    stage1_error = stage3_error = None
+    _print_lock = threading.Lock()
+
+    def _run_dwi_stages():
+        nonlocal dwi_output_dirs, stage1_error
+        try:
+            if not has_dwi:
+                with _print_lock:
+                    print_header("STAGE 1 — DWI Processing")
+                    print("  Skipped: no DWI acquisitions found.\n")
+                return
+
+            print_header("STAGE 1 — DWI Processing")
+            print(f"  Converting {len(dirs['candidate_dwi'])} candidate series…")
+            conversions = convert_all_candidates(dirs["candidate_dwi"], str(output_path))
+            classified = classify_candidates(dirs["candidate_dwi"], conversions)
+
+            conversions["fwd_pe_dirs"] = classified["fwd_pe_dirs"]
+            conversions["rpe_dirs"] = classified["rpe_dirs"]
+            dwi_dirs, fwd_pe_dirs, rpe_dirs, rpe_all_map, _ = match_ap_pa_pairs(
+                classified["dwi_dirs"],
+                classified["pending_fwd"],
+                classified["pending_rpe"],
+                conversions,
+            )
+            pe_assignment_map = build_pe_assignment_map(
+                dwi_dirs, fwd_pe_dirs, rpe_dirs, rpe_all_map
+            )
+
+            if not dwi_dirs:
+                print("  No processable DWI series found — skipping.\n")
+                return
+
+            plans = [
+                plan_workflow(
+                    dwi_dir=dwi_dir,
+                    mprage_dirs=dirs["mprage_dirs"],
+                    fwd_pe_dirs=fwd_pe_dirs,
+                    rpe_dirs=rpe_dirs,
+                    rpe_all_map=rpe_all_map,
+                    pe_assignment_map=pe_assignment_map,
+                    conversions=conversions,
+                    cfg=cfg,
+                )
+                for dwi_dir in dwi_dirs
+            ]
+            print_plan(plans, classified["skipped"])
+
+            if dry_run:
+                print("  [DRY RUN] Skipping workflow execution.\n")
+                return
+
+            for plan in plans:
+                series_name = plan["dwi_name"]
+                series_out = output_path / series_name
+                series_tmp = series_out / "tmp"
+                series_tmp.mkdir(parents=True, exist_ok=True)
+
+                # ── Convert T1 series dir to NiftiGz ─────────────────────────
+                t1_conv = convert_series_to_nii(
+                    plan["t1_dir"], str(series_tmp / "t1_nii")
+                )
+                t1w = NiftiGz(t1_conv["nii"])
+
+                # ── Convert DWI NIfTI + grad files to MIF ────────────────────
+                dwi_mif_path = str(series_tmp / f"DWI_raw_{plan['pe_dir']}.mif.gz")
+                if not Path(dwi_mif_path).exists():
+                    _mif_cmd = [
+                        "mrconvert", plan["dwi_nii"], dwi_mif_path,
+                        "-fslgrad", plan["dwi_bvec"], plan["dwi_bval"],
+                    ]
+                    if plan.get("dwi_json"):
+                        _mif_cmd += ["-json_import", plan["dwi_json"]]
+                    subprocess.run(_mif_cmd, check=True)
+                dwi = ImageFormatGz(dwi_mif_path)
+
+                # ── Convert RPE NIfTI to MIF (if applicable) ─────────────────
+                rpe_img = None
+                if plan.get("rpe_nii"):
+                    rpe_mif_path = str(series_tmp / f"RPE_{plan['rpe_dir']}.mif.gz")
+                    if not Path(rpe_mif_path).exists():
+                        _rpe_cmd = [
+                            "mrconvert", plan["rpe_nii"], rpe_mif_path,
+                            "-fslgrad", plan["rpe_bvec"], plan["rpe_bval"],
+                        ]
+                        if plan.get("rpe_json"):
+                            _rpe_cmd += ["-json_import", plan["rpe_json"]]
+                        subprocess.run(_rpe_cmd, check=True)
+                    rpe_img = ImageFormatGz(rpe_mif_path)
+
+                # ── Forward b0 (rpe_pair only) ────────────────────────────────
+                fwd_b0_img = None
+                if plan.get("fwd_pe_nii"):
+                    fwd_b0_img = NiftiGz(plan["fwd_pe_nii"])
+
+                # ── Build and submit PhantomKitWorkflow ──────────────────────
+                # Derive bool flags from _parsed_steps — passed as individual
+                # bools rather than list[str] to avoid pydra serialisation
+                # issues with list types crossing nested workflow boundaries.
+                _steps = plan["processing_steps"]
+                wf = PhantomKitWorkflow(
+                    t1w=t1w,
+                    phantom=phantom,
+                    dwi=dwi,
+                    dwi_pe_dir=plan["pe_dir"],
+                    preproc_mode=plan["preproc_mode"],
+                    rpe=rpe_img,
+                    fwd_b0=fwd_b0_img,
+                    readout_time=plan["readout_time"],
+                    eddy_options=plan["eddy_options"],
+                    do_denoise="dwidenoise" in _steps,
+                    do_degibbs="mrgibbs" in _steps,
+                    do_fslpreproc="dwifslpreproc" in _steps,
+                    do_biascorrect="dwibiascorrect" in _steps,
+                    gradcheck="gradcheck" in _steps,
+                )
+                cache_dir = str(series_out / ".pydra_cache")
+                with Submitter(worker=worker, cache_root=cache_dir) as sub:
+                    result = sub(wf)
+
+                if result is None or result.errored:
+                    raise RuntimeError(
+                        f"PhantomKitWorkflow failed — see crash report in {cache_dir}"
+                    )
+
+                # Copy workflow outputs from pydra cache to series_out so that
+                # Stage 2 (PhantomProcessor) can find them by conventional names.
+                out = result.outputs
+                _copy_map = [
+                    (out.t1_in_dwi,    "T1_in_DWI_space.nii.gz"),
+                    (out.adc,          "ADC.nii.gz"),
+                    (out.fa,           "FA.nii.gz"),
+                    (out.dwi_preproc,  plan["dwi_preproc_name"]),
+                ]
+                for src, dst_name in _copy_map:
+                    if src is not None:
+                        shutil.copy2(str(src), str(series_out / dst_name))
+
+                # Expose the raw DWI MIF as DWI_raw.mif.gz so _process_dwi_html
+                # can show the raw vs preprocessed dual-viewer panel in DWI.html.
+                raw_mif_src = series_tmp / f"DWI_raw_{plan['pe_dir']}.mif.gz"
+                if raw_mif_src.exists():
+                    shutil.copy2(str(raw_mif_src), str(series_out / "DWI_raw.mif.gz"))
+
+                dwi_output_dirs.append(series_out)
+
+        except Exception as exc:
+            stage1_error = exc
+
+    def _run_stage3():
+        nonlocal stage3_error
+        try:
+            if has_native:
+                run_stage3(input_path, output_path, template_dir, scan_info, dry_run, n_threads=n_threads)
+            else:
+                with _print_lock:
+                    print_header("STAGE 3 — Phantom QC on Native Contrasts")
+                    print("  Skipped.\n")
+        except Exception as exc:
+            stage3_error = exc
+
+    # Stages 1 and 3 run in parallel
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        concurrent.futures.wait(
+            [executor.submit(_run_dwi_stages), executor.submit(_run_stage3)]
+        )
+
+    if stage1_error:
+        raise click.ClickException(f"Stage 1 failed: {_format_exc(stage1_error)}")
+    if stage3_error:
+        raise click.ClickException(f"Stage 3 failed: {_format_exc(stage3_error)}")
+
+    # Stage 2: phantom QC in DWI space (sequential — needs Stage 1 outputs)
+    if dwi_output_dirs:
+        run_stage2(dwi_output_dirs, output_path, template_dir, dry_run, n_threads=n_threads)
+    else:
+        print_header("STAGE 2 — Phantom QC in DWI Space")
+        print("  Skipped: Stage 1 did not run.\n")
+
+    # Remove _staged_input/ created by _wrap_flat_inputs (if any)
+    if not nocleanup:
+        _cleanup_staged_input(output_path)
+
+    # Remove staging-only DWI directories (contain only tmp/, no final outputs)
+    if has_dwi and not nocleanup:
+        _t1_markers = {"T1_in_DWI_space.nii.gz", "T1.nii.gz"}
+        for d in sorted(output_path.iterdir()):
+            if not d.is_dir():
+                continue
+            if any((d / m).exists() for m in _t1_markers):
+                continue
+            if (d / "tmp").exists() and not any(
+                p for p in d.iterdir()
+                if p.name != "tmp" and not p.name.startswith(".")
+            ):
+                try:
+                    shutil.rmtree(d)
+                    print(f"  Removed staging dir: {d.name}")
+                except Exception as e:
+                    print(f"  Warning: could not remove {d.name}: {e}")
+
+    print_header("Pipeline Complete")
+    print(f"  All outputs written to: {output_path}\n")
+
+
+@main.command("vendor-compare")
+@click.option(
+    "--output-dir",
+    required=True,
+    help="Completed pipeline's session output directory.",
+)
+@click.option(
+    "--vendor-image", "vendor_images",
+    required=True,
+    multiple=True,
+    type=click.Path(exists=True),
+    help="Vendor-generated parametric map NIfTI (e.g. siemens_ADC.nii.gz). "
+         "Repeat once per vendor image to compare several at once.",
+)
+@click.option(
+    "--vendor-label", "vendor_labels",
+    multiple=True,
+    metavar="TEXT",
+    help="Label for each --vendor-image (repeat once per image, same order; "
+         "defaults to each image's filename stem when omitted entirely).",
+)
+@click.option(
+    "--map-type",
+    required=True,
+    type=click.Choice(["adc", "t1", "t2"], case_sensitive=False),
+    help="Which map the vendor image is: adc (DWI space) or t1/t2 (native-contrast space).",
+)
+@click.option(
+    "--phantom",
+    default="",
+    help="Phantom name, e.g. SPIRIT. Used for the report title and to look up "
+         "calibration reference values.",
+)
+@click.option(
+    "--template-dir",
+    default=None,
+    metavar="DIR",
+    help="Path to template_data/ directory (auto-detected if omitted).",
+)
+@click.option(
+    "--output", "-o",
+    required=True,
+    help="Output HTML report path.",
+)
+def vendor_compare(
+    output_dir: str, vendor_images: tuple[str, ...], vendor_labels: tuple[str, ...],
+    map_type: str, phantom: str, template_dir: str | None, output: str,
+) -> None:
+    """Compare one or more vendor-provided ADC/T1/T2 maps against phantomkit's own values, per vial."""
+    import tempfile
+
+    from phantomkit.pipeline import print_header
+    from phantomkit.vendor_compare import (
+        locate_reference, compute_vendor_vial_stats, ensure_nifti, infer_adc_scale, image_stem,
+    )
+    from phantomkit.plotting.vendor_compare_html import build_vendor_compare_html
+
+    if vendor_labels and len(vendor_labels) != len(vendor_images):
+        raise click.ClickException(
+            f"--vendor-label provided {len(vendor_labels)} time(s) but "
+            f"{len(vendor_images)} --vendor-image given — counts must match."
+        )
+    labels = list(vendor_labels) if vendor_labels else [
+        image_stem(Path(p)) for p in vendor_images
+    ]
+
+    output_path = Path(output_dir)
+    map_type = map_type.lower()
+
+    print_header("Vendor Comparison")
+    print(f"  Output dir:    {output_path}")
+    print(f"  Map type:      {map_type.upper()}")
+    for label, path in zip(labels, vendor_images):
+        print(f"  Vendor image:  {label} ({path})")
+    print()
+
+    print("  Locating phantomkit's existing report and vial masks...")
+    ref = locate_reference(output_path, map_type)
+    print(f"    Report:      {ref['report_html']}")
+    print(f"    Vial masks:  {len(ref['vial_masks'])} found")
+    if ref.get("reference_xlsx"):
+        print(f"    Reference xlsx: {ref['reference_xlsx']} (full mean/median/CI available)")
+    if ref.get("phantomkit_image"):
+        print(f"    phantomkit image: {ref['phantomkit_image']} (available as a viewer background)")
+
+    with tempfile.TemporaryDirectory(prefix="phantomkit_vendor_compare_") as tmp:
+        vendor_nifti_paths = []
+        vendor_stats_list = []
+        scales = []
+        for i, (label, vendor_image) in enumerate(zip(labels, vendor_images)):
+            # Namespaced by index, not label — labels are free text (e.g.
+            # user-supplied via the GUI) and may contain characters unsafe
+            # for a directory name.
+            vendor_tmp = Path(tmp) / f"vendor{i}"
+            print(f"\n  [{label}] Normalizing vendor image for the viewer (mrconvert)...")
+            vendor_nifti = ensure_nifti(Path(vendor_image), vendor_tmp)
+            print(f"    {vendor_nifti.name}")
+
+            print(f"  [{label}] Regridding vial masks onto the vendor image and computing stats...")
+            vendor_stats = compute_vendor_vial_stats(
+                vendor_nifti, ref["vial_masks"], vendor_tmp
+            )
+            print(f"    Computed stats for {len(vendor_stats)} vials")
+
+            scale = infer_adc_scale(vendor_stats) if map_type == "adc" else 1.0
+            if map_type == "adc":
+                print(f"    Detected unit scale for {label}: x{scale:g} "
+                      f"(vs. phantomkit's own x10⁻³ mm²/s convention)")
+
+            vendor_nifti_paths.append(str(vendor_nifti))
+            vendor_stats_list.append(vendor_stats)
+            scales.append(scale)
+
+        print("\n  Building comparison report...")
+        build_vendor_compare_html(
+            vendor_images=vendor_nifti_paths,
+            vendor_labels=labels,
+            vial_masks={k: str(v) for k, v in ref["vial_masks"].items()},
+            vendor_stats_list=vendor_stats_list,
+            reference_html=str(ref["report_html"]),
+            reference_xlsx=str(ref["reference_xlsx"]) if ref.get("reference_xlsx") else None,
+            template_dir=template_dir,
+            map_type=map_type,
+            output=output,
+            phantom=phantom,
+            scales=scales,
+            phantomkit_image=str(ref["phantomkit_image"]) if ref.get("phantomkit_image") else None,
+        )
+
+    print_header("Vendor Comparison Complete")
+    print(f"  Report written to: {output}\n")

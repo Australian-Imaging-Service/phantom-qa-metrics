@@ -35,13 +35,30 @@ _MEANS = {
 
 
 def _write_mean_std_csvs(metrics_dir: Path, base_name: str, scale: float = 1.0) -> None:
-    """Write a pair of mean/std CSV files for one contrast."""
-    means = [_MEANS[v] * scale for v in _VIALS]
-    stds = [m * 0.05 for m in means]
-    df_mean = pd.DataFrame({"vial": _VIALS, "value": means})
-    df_std = pd.DataFrame({"vial": _VIALS, "value": stds})
-    df_mean.to_csv(metrics_dir / f"{base_name}_mean_matrix.csv", index=False)
-    df_std.to_csv(metrics_dir / f"{base_name}_std_matrix.csv", index=False)
+    """Write a per-contrast xlsx with all 8 metric sheets."""
+    means = np.array([_MEANS[v] * scale for v in _VIALS], dtype=float)
+    stds = means * 0.05
+    counts = np.full(len(_VIALS), 1000.0)
+    p25 = means * 0.92
+    p75 = means * 1.08
+    mins = means * 0.80
+    maxs = means * 1.20
+    medians = means * 1.01
+
+    xlsx_path = metrics_dir / f"{base_name}.xlsx"
+    mean_mad   = means * 0.04   # ~4% of mean as mean MAD
+    median_mad = means * 0.035  # ~3.5% as median MAD
+
+    with pd.ExcelWriter(xlsx_path, engine="openpyxl") as writer:
+        for sheet_name, vals in [
+            ("mean", means), ("std", stds), ("median", medians),
+            ("count", counts), ("p25", p25), ("p75", p75),
+            ("min", mins), ("max", maxs),
+            ("mean_mad", mean_mad), ("median_mad", median_mad),
+        ]:
+            pd.DataFrame({"vial": _VIALS, "vol0": vals}).to_excel(
+                writer, sheet_name=sheet_name, index=False
+            )
 
 
 def _write_vial_intensity_csv(path: Path, n_vols: int = 1) -> None:
@@ -71,20 +88,20 @@ class TestPlotVialIntensity:
         _write_vial_intensity_csv(self.mean_csv, n_vols=1)
         _write_vial_intensity_csv(self.std_csv, n_vols=1)  # reuse as std
 
-    def test_scatter_returns_png_path(self) -> None:
+    def test_scatter_returns_html_path(self) -> None:
         out = self.fn(
             csv_file=str(self.mean_csv),
             plot_type="scatter",
-            output=str(self.tmp / "out.png"),
+            output=str(self.tmp / "out.html"),
         )
-        assert out.endswith(".png")
+        assert out.endswith(".html")
         assert os.path.exists(out)
 
     def test_line_plot(self) -> None:
         out = self.fn(
             csv_file=str(self.mean_csv),
             plot_type="line",
-            output=str(self.tmp / "out.png"),
+            output=str(self.tmp / "out.html"),
         )
         assert os.path.exists(out)
 
@@ -92,7 +109,7 @@ class TestPlotVialIntensity:
         out = self.fn(
             csv_file=str(self.mean_csv),
             plot_type="bar",
-            output=str(self.tmp / "out.png"),
+            output=str(self.tmp / "out.html"),
         )
         assert os.path.exists(out)
 
@@ -101,7 +118,7 @@ class TestPlotVialIntensity:
             csv_file=str(self.mean_csv),
             plot_type="scatter",
             std_csv=str(self.std_csv),
-            output=str(self.tmp / "out.png"),
+            output=str(self.tmp / "out.html"),
         )
         assert os.path.exists(out)
 
@@ -111,7 +128,7 @@ class TestPlotVialIntensity:
             plot_type="scatter",
             std_csv=str(self.std_csv),
             annotate=True,
-            output=str(self.tmp / "out.png"),
+            output=str(self.tmp / "out.html"),
         )
         assert os.path.exists(out)
 
@@ -121,12 +138,11 @@ class TestPlotVialIntensity:
         out = self.fn(
             csv_file=str(mean_csv),
             plot_type="line",
-            output=str(self.tmp / "out.png"),
+            output=str(self.tmp / "out.html"),
         )
         assert os.path.exists(out)
 
     def test_with_roi_image(self, tmp_path) -> None:
-        # Create a tiny valid PNG using matplotlib itself
         import matplotlib.pyplot as plt
 
         roi_png = tmp_path / "roi.png"
@@ -139,7 +155,7 @@ class TestPlotVialIntensity:
             csv_file=str(self.mean_csv),
             plot_type="scatter",
             roi_image=str(roi_png),
-            output=str(tmp_path / "out.png"),
+            output=str(tmp_path / "out.html"),
         )
         assert os.path.exists(out)
 
@@ -193,18 +209,18 @@ class TestMapsIrHelpers:
         y = np.array([1.0, 2.0, 3.0])
         assert calc_r2(y, np.full_like(y, y.mean())) == pytest.approx(0.0)
 
-    def test_find_csv_file(self, tmp_path) -> None:
-        from phantomkit.plotting.maps_ir import find_csv_file
+    def test_find_xlsx_file(self, tmp_path) -> None:
+        from phantomkit.plotting.maps_ir import find_xlsx_file
 
-        (tmp_path / "session_ir_500_mean_matrix.csv").touch()
-        result = find_csv_file(str(tmp_path), "ir_500", "_mean_matrix.csv")
-        assert result.endswith("_mean_matrix.csv")
+        (tmp_path / "ir_500.xlsx").touch()
+        result = find_xlsx_file(str(tmp_path), "ir_500")
+        assert result.endswith("ir_500.xlsx")
 
-    def test_find_csv_file_not_found(self, tmp_path) -> None:
-        from phantomkit.plotting.maps_ir import find_csv_file
+    def test_find_xlsx_file_not_found(self, tmp_path) -> None:
+        from phantomkit.plotting.maps_ir import find_xlsx_file
 
         with pytest.raises(FileNotFoundError):
-            find_csv_file(str(tmp_path), "missing", "_mean_matrix.csv")
+            find_xlsx_file(str(tmp_path), "missing")
 
 
 # ---------------------------------------------------------------------------
@@ -236,7 +252,7 @@ class TestMapsIrPlot:
         out = plot_vial_ir_means_std(
             contrast_files=contrast_files,
             metric_dir=str(metrics),
-            output_file=str(tmp_path / "ir_plot.png"),
+            output_file=str(tmp_path / "ir_plot.html"),
         )
         assert os.path.exists(out)
 
@@ -247,24 +263,11 @@ class TestMapsIrPlot:
         plot_vial_ir_means_std(
             contrast_files=contrast_files,
             metric_dir=str(metrics),
-            output_file=str(tmp_path / "ir_plot.png"),
+            output_file=str(tmp_path / "ir_plot.html"),
         )
-        # A CSV with fitted T1 values should be written alongside the plot
-        # csv_files = (
-        #     list(tmp_path.glob("*T1*.csv"))
-        #     + list(tmp_path.glob("*fit*.csv"))
-        #     + list(metrics.glob("*fit*.csv"))
-        # )
-        # Accept any CSV output from the function
+        # The function should write a fit CSV alongside the plot
         all_csvs = list(tmp_path.rglob("*.csv")) + list(metrics.rglob("*.csv"))
-        # The function writes a fit CSV; at minimum one CSV beyond the inputs exists
-        input_csvs = {
-            str(metrics / f"ir_{ti}_{s}_matrix.csv")
-            for ti in self._TIS
-            for s in ("mean", "std")
-        }
-        extra_csvs = [c for c in all_csvs if str(c) not in input_csvs]
-        assert len(extra_csvs) > 0, "Expected a fitted-parameters CSV to be written"
+        assert len(all_csvs) > 0, "Expected a fitted-parameters CSV to be written"
 
     def test_with_roi_image(self, setup, tmp_path) -> None:
         import matplotlib.pyplot as plt
@@ -279,7 +282,7 @@ class TestMapsIrPlot:
         out = plot_vial_ir_means_std(
             contrast_files=contrast_files,
             metric_dir=str(metrics),
-            output_file=str(tmp_path / "ir_plot.png"),
+            output_file=str(tmp_path / "ir_plot.html"),
             roi_image=str(roi_png),
         )
         assert os.path.exists(out)
@@ -313,11 +316,11 @@ class TestMapsTeHelpers:
         y = np.array([3.0, 2.0, 1.0])
         assert calc_r2(y, y) == pytest.approx(1.0)
 
-    def test_find_csv_file_not_found(self, tmp_path) -> None:
-        from phantomkit.plotting.maps_te import find_csv_file
+    def test_find_xlsx_file_not_found(self, tmp_path) -> None:
+        from phantomkit.plotting.maps_te import find_xlsx_file
 
         with pytest.raises(FileNotFoundError):
-            find_csv_file(str(tmp_path), "missing", "_mean_matrix.csv")
+            find_xlsx_file(str(tmp_path), "missing")
 
 
 # ---------------------------------------------------------------------------
@@ -348,7 +351,7 @@ class TestMapsTePlot:
         out = plot_vial_te_means_std(
             contrast_files=contrast_files,
             metric_dir=str(metrics),
-            output_file=str(tmp_path / "te_plot.png"),
+            output_file=str(tmp_path / "te_plot.html"),
         )
         assert os.path.exists(out)
 
@@ -365,7 +368,7 @@ class TestMapsTePlot:
         out = plot_vial_te_means_std(
             contrast_files=contrast_files,
             metric_dir=str(metrics),
-            output_file=str(tmp_path / "te_plot.png"),
+            output_file=str(tmp_path / "te_plot.html"),
             roi_image=str(roi_png),
         )
         assert os.path.exists(out)

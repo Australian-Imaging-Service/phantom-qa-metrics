@@ -8,10 +8,15 @@ echo time (TE) contrast images, plots them grouped by vials, and fits a
 mono-exponential T2 decay model to estimate T2 relaxation times.
 
 Key outputs:
-- Publication-quality 3x3 grid plot of intensity vs echo time
+- Interactive HTML (default) or publication-quality PNG with 3x3 grid plot
 - CSV file with fitted T2 values and R² statistics
 ================================================================================
 """
+
+import matplotlib
+
+matplotlib.use("Agg")  # non-interactive backend; required when plotting runs
+# in a background thread (e.g. ThreadPoolExecutor on macOS)
 
 import logging
 import os
@@ -26,41 +31,96 @@ from scipy.optimize import curve_fit
 logger = logging.getLogger(__name__)
 
 
-def find_csv_file(metric_dir, contrast_name, suffix):
+def find_xlsx_file(metric_dir, contrast_name):
     """
-    Find a CSV file in a directory that matches the contrast name and suffix.
-
-    Args:
-        metric_dir: Directory containing CSV files
-        contrast_name: Base name of the contrast to search for
-        suffix: File suffix to match (e.g., '_mean_matrix.csv')
-
-    Returns:
-        Full path to the matched CSV file
+    Find a per-contrast xlsx file in metric_dir.
 
     Raises:
         FileNotFoundError: If no matching file is found
     """
+    target = contrast_name + ".xlsx"
     for f in os.listdir(metric_dir):
-        if contrast_name in f and f.endswith(suffix):
+        if f == target:
+            return os.path.join(metric_dir, f)
+    raise FileNotFoundError(
+        f"No xlsx file found for contrast '{contrast_name}' in {metric_dir}"
+    )
+
+
+def find_csv_file(metric_dir, contrast_name, suffix):
+    """Kept for backwards compatibility — prefer find_xlsx_file."""
+    exact_tail = contrast_name + suffix
+    for f in os.listdir(metric_dir):
+        if f.endswith(exact_tail):
             return os.path.join(metric_dir, f)
     raise FileNotFoundError(
         f"No CSV file found for contrast '{contrast_name}' with suffix '{suffix}' in {metric_dir}"
     )
 
 
+def _compute_fits_te(vial_groups, vial_to_idx, data_matrix, contrast_numbers):
+    """Fit T2 mono-exponential decay for all vials; return (subplot_fits, fit_results)."""
+    subplot_fits = []
+    fit_results = []
+    for group in vial_groups:
+        for vial in group:
+            if vial not in vial_to_idx:
+                continue
+            i = vial_to_idx[vial]
+            try:
+                popt, pcov = curve_fit(
+                    mono_exp, contrast_numbers, data_matrix[i, :],
+                    p0=(data_matrix[i, 0], 100),
+                )
+                S0_fit, T2_fit = popt
+                r2 = calc_r2(data_matrix[i, :], mono_exp(contrast_numbers, *popt))
+                try:
+                    T2_se = float(np.sqrt(pcov[1, 1])) if np.isfinite(pcov[1, 1]) else None
+                except Exception:
+                    T2_se = None
+                fit_results.append({"Vial": vial, "S0": S0_fit, "T2_ms": T2_fit, "T2_se_ms": T2_se, "R2": r2})
+                x_fit = np.linspace(0, max(contrast_numbers), 200)
+                y_fit = mono_exp(x_fit, *popt)
+                ci_lower = ci_upper = None
+                try:
+                    samples = np.random.multivariate_normal(popt, pcov, 1000)
+                    preds = np.array([mono_exp(x_fit, *s) for s in samples])
+                    ci_lower = np.percentile(preds, 2.5, axis=0)
+                    ci_upper = np.percentile(preds, 97.5, axis=0)
+                except (np.linalg.LinAlgError, ValueError) as e:
+                    logger.warning("Could not calculate CI for vial %s: %s", vial, e)
+                subplot_fits.append({
+                    "vial": vial,
+                    "x_fit": x_fit.tolist(),
+                    "y_fit": y_fit.tolist(),
+                    "ci_lower": ci_lower.tolist() if ci_lower is not None else None,
+                    "ci_upper": ci_upper.tolist() if ci_upper is not None else None,
+                })
+            except RuntimeError:
+                logger.warning("Could not fit T₂ for vial %s", vial)
+    return subplot_fits, fit_results
+
+
 def extract_numeric(label):
     """
-    Extract the last numeric value from a string label.
+    Extract the echo time from a filename label.
 
-    Used to extract echo times from filenames (e.g., 'SE_80' → 80)
+    Matches the number immediately following a 'TE' token (e.g.
+    'TE_80' or 'SIM-TE83ms' -> 80 / 83), so a trailing, unrelated scan
+    reference number appended during staging (e.g. 'TE_14_34', where 14
+    is the echo time and 34 is a series number) isn't mistaken for it.
+    Falls back to the last number in the label when no 'TE' token is
+    present.
 
     Args:
-        label: String containing numbers (e.g., 'contrast_100')
+        label: String containing numbers (e.g., 'SE_80')
 
     Returns:
-        Last integer found in the string, or None if no numbers found
+        The echo time, or None if no numbers found.
     """
+    token_match = re.search(r"TE[_-]?(\d+)", label, re.IGNORECASE)
+    if token_match:
+        return int(token_match.group(1))
     numbers = re.findall(r"\d+", label)
     return int(numbers[-1]) if numbers else None
 
@@ -103,14 +163,23 @@ def calc_r2(y_true, y_pred):
 
 
 def plot_vial_te_means_std(
-    contrast_files: list[str],
-    metric_dir: str,
-    output_file: str = "vial_summary_pub.png",
-    annotate: bool = False,
-    roi_image: str | None = None,
-) -> str:
+    contrast_files,
+    metric_dir,
+    output_file="vial_summary_pub.png",
+    annotate=False,
+    roi_image=None,
+    output_format: str = "html",
+    nifti_image: str | None = None,
+    vial_niftis: dict | None = None,
+    fits_output: str | None = None,
+    relaxometry_reference: dict | None = None,
+    phantom: str | None = None,
+    overlay_contrast: str | None = None,
+    scan_date: str | None = None,
+):
     """
-    Create publication-quality plots of vial intensity data with T2 curve fitting.
+    Create interactive HTML or publication-quality PNG plots of vial intensity
+    data with T2 curve fitting.
 
     Generates a 3x3 grid of subplots showing intensity vs echo time for
     different vial groups, with fitted T2 decay curves overlaid on the measured data.
@@ -119,19 +188,19 @@ def plot_vial_te_means_std(
         contrast_files: List of NIfTI file paths for different echo times
         metric_dir: Directory containing mean/std CSV files
         output_file: Output filename for the plot (default: 'vial_summary_pub.png')
-        annotate: Whether to annotate points with mean ± std (not currently used)
-        roi_image: Optional path to ROI overlay image for extra subplot
+        annotate: Whether to annotate points with mean ± std (PNG mode only)
+        roi_image: Optional path to ROI overlay image (PNG mode only)
+        output_format: "html" (default) for interactive HTML, "png" for static figure
+        nifti_image: Path to the background NIfTI file to embed in the HTML viewer.
+        vial_niftis: ``{vial_name: path}`` mapping for ROI overlay NIfTIs (all shown in red).
 
     Returns:
-        Absolute path to the saved plot file.
+        Absolute path to the saved output file.
     """
 
     # ========================================================================
     # CONFIGURATION: Vial groupings for subplots
     # ========================================================================
-    # Define which vials appear together in each subplot
-    # Single-element lists get their own subplot (plotted in black)
-    # Multi-element lists share a subplot (each vial gets a different color)
     vial_groups = [
         ["S"],  # Subplot 1: Vial S alone
         ["D", "P"],  # Subplot 2: Vials D and P together
@@ -141,337 +210,271 @@ def plot_vial_te_means_std(
         ["A", "R"],  # Subplot 6: Vials A and R together
         ["O"],  # Subplot 7: Vial O alone
         ["Q"],  # Subplot 8: Vial Q alone
-        # Subplot 9: Reserved for ROI overlay image (if provided)
+        # Subplot 9: Reserved for MRI viewer (HTML) or ROI overlay image (PNG)
     ]
 
     # ========================================================================
     # DATA LOADING: Read mean and std deviation from CSV files
     # ========================================================================
-    vial_labels = None  # Vial identifiers (e.g., ['A', 'B', 'C', ...])
-    contrast_numbers = []  # Echo times extracted from filenames
-    mean_matrix = []  # Mean intensity values for each vial at each TE
-    std_matrix = []  # Standard deviation values
+    vial_labels = None
+    contrast_numbers = []
+    mean_matrix = []
+    std_matrix = []
+    median_matrix = []
+    count_matrix = []
+    p25_matrix = []
+    p75_matrix = []
+    min_matrix = []
+    max_matrix = []
+    mean_mad_matrix = []
+    median_mad_matrix = []
 
-    # Loop through each contrast file (different echo times)
     for nifti_path in contrast_files:
-        # Extract base filename without extension
         base_name = os.path.basename(nifti_path).replace(".nii.gz", "")
+        xlsx_path = find_xlsx_file(metric_dir, base_name)
+        mean_df = pd.read_excel(xlsx_path, sheet_name="mean")
+        std_df = pd.read_excel(xlsx_path, sheet_name="std")
 
-        # Find corresponding CSV files with mean and std data
-        mean_csv = find_csv_file(metric_dir, base_name, "_mean_matrix.csv")
-        std_csv = find_csv_file(metric_dir, base_name, "_std_matrix.csv")
-
-        # Read CSV files (auto-detect delimiter: comma, tab, etc.)
-        mean_df = pd.read_csv(mean_csv, sep=None, engine="python")
-        std_df = pd.read_csv(std_csv, sep=None, engine="python")
-
-        # Get vial labels from first file (column 0)
         if vial_labels is None:
             vial_labels = mean_df.iloc[:, 0].astype(str).tolist()
 
-        # Extract intensity values (column 1) and echo time from filename
         mean_matrix.append(mean_df.iloc[:, 1].to_numpy())
         std_matrix.append(std_df.iloc[:, 1].to_numpy())
         contrast_numbers.append(extract_numeric(base_name))
 
-    # Convert lists to numpy arrays for easier manipulation
-    mean_matrix = np.array(mean_matrix)
-    std_matrix = np.array(std_matrix)
+        # Optional sheets — graceful degradation for older xlsx files
+        _mean_col = mean_df.iloc[:, 1].to_numpy()
+        for _attr, _sheet in [
+            (median_matrix, "median"),
+            (count_matrix, "count"),
+            (p25_matrix, "p25"),
+            (p75_matrix, "p75"),
+            (min_matrix, "min"),
+            (max_matrix, "max"),
+            (mean_mad_matrix, "mean_mad"),
+            (median_mad_matrix, "median_mad"),
+        ]:
+            try:
+                _df = pd.read_excel(xlsx_path, sheet_name=_sheet)
+                vals = _df.iloc[:, 1].to_numpy().astype(float)
+                nan_mask = np.isnan(vals)
+                if nan_mask.any():
+                    vals[nan_mask] = _mean_col[nan_mask]
+                _attr.append(vals)
+            except Exception:
+                _attr.append(_mean_col.copy())
+
+    mean_matrix       = np.array(mean_matrix)
+    std_matrix        = np.array(std_matrix)
+    median_matrix     = np.array(median_matrix)
+    count_matrix      = np.array(count_matrix)
+    p25_matrix        = np.array(p25_matrix)
+    p75_matrix        = np.array(p75_matrix)
+    min_matrix        = np.array(min_matrix)
+    max_matrix        = np.array(max_matrix)
+    mean_mad_matrix   = np.array(mean_mad_matrix)
+    median_mad_matrix = np.array(median_mad_matrix)
 
     # ========================================================================
     # DATA ORGANIZATION: Sort by echo time and transpose
     # ========================================================================
-    # Sort all data by echo time (ascending order)
     sort_idx = np.argsort(contrast_numbers)
-    contrast_numbers = np.array(contrast_numbers)[sort_idx]
-    mean_matrix = mean_matrix[sort_idx].T  # Transpose so rows=vials, cols=TE
-    std_matrix = std_matrix[sort_idx].T
+    contrast_numbers  = np.array(contrast_numbers)[sort_idx]
+    mean_matrix       = mean_matrix[sort_idx].T    # rows=vials, cols=TE
+    std_matrix        = std_matrix[sort_idx].T
+    median_matrix     = median_matrix[sort_idx].T
+    count_matrix      = count_matrix[sort_idx].T
+    p25_matrix        = p25_matrix[sort_idx].T
+    p75_matrix        = p75_matrix[sort_idx].T
+    min_matrix        = min_matrix[sort_idx].T
+    max_matrix        = max_matrix[sort_idx].T
+    mean_mad_matrix   = mean_mad_matrix[sort_idx].T
+    median_mad_matrix = median_mad_matrix[sort_idx].T
 
-    # Create mapping from vial label to row index for quick lookup
     vial_to_idx = {label: i for i, label in enumerate(vial_labels)}
-
-    # Define y-axis limits for all subplots (consistent across all plots)
     yticks = [-100, 1000, 2000, 3000, 4000]
 
     # ========================================================================
-    # FIGURE SETUP: Create 3x3 subplot grid
+    # CURVE FITTING (mean and median \u2014 shared by both PNG and HTML paths)
+    # ========================================================================
+    cmap = plt.get_cmap("tab10")
+    subplot_fits, fit_results = _compute_fits_te(
+        vial_groups, vial_to_idx, mean_matrix, contrast_numbers
+    )
+    subplot_fits_median, fit_results_median = _compute_fits_te(
+        vial_groups, vial_to_idx, median_matrix, contrast_numbers
+    )
+
+    # ========================================================================
+    # SAVE: Fitted T2 CSV (mean-based; always, regardless of output format)
+    # ========================================================================
+    csv_stem = re.sub(r"\.(png|html)$", "", output_file, flags=re.IGNORECASE)
+    csv_output = fits_output if fits_output else csv_stem + "_T2_fits.csv"
+    pd.DataFrame(fit_results).to_csv(csv_output, index=False)
+    logger.info("Fitted parameters saved to %s", csv_output)
+
+    # ========================================================================
+    # HTML OUTPUT
+    # ========================================================================
+    if output_format == "html":
+        from phantomkit.plotting._html_common import build_relaxometry_html
+
+        html_file = re.sub(r"\.(png|html)$", "", output_file, flags=re.IGNORECASE) + ".html"
+
+        embedded_data = {
+            "type": "maps_te",
+            "phantom": phantom,
+            "scan_date": scan_date,
+            "vial_groups": vial_groups,
+            "contrast_numbers": contrast_numbers.tolist(),
+            "mean_matrix": mean_matrix.tolist(),
+            "std_matrix": std_matrix.tolist(),
+            "fit_results": fit_results,
+        }
+
+        html = build_relaxometry_html(
+            title="T2 Echo Time Mapping",
+            subtitle="Intensity vs echo time with T₂ curve fitting",
+            x_label="Echo Time (ms)",
+            fit_label="T₂ fit",
+            fit_key="T2_ms",
+            vial_groups=vial_groups,
+            contrast_numbers=contrast_numbers,
+            mean_matrix=mean_matrix,
+            std_matrix=std_matrix,
+            median_matrix=median_matrix,
+            count_matrix=count_matrix,
+            p25_matrix=p25_matrix,
+            p75_matrix=p75_matrix,
+            min_matrix=min_matrix,
+            max_matrix=max_matrix,
+            mean_mad_matrix=mean_mad_matrix,
+            median_mad_matrix=median_mad_matrix,
+            vial_labels=vial_labels,
+            subplot_fits=subplot_fits,
+            subplot_fits_median=subplot_fits_median,
+            fit_results_median=fit_results_median,
+            embedded_data=embedded_data,
+            nifti_image=nifti_image,
+            vial_niftis=vial_niftis,
+            ref_data=relaxometry_reference,
+            overlay_contrast=overlay_contrast,
+        )
+
+        from pathlib import Path
+        Path(html_file).write_text(html, encoding="utf-8")
+        logger.info("Interactive HTML saved to %s", html_file)
+        return os.path.abspath(html_file)
+
+    # ========================================================================
+    # PNG OUTPUT (original matplotlib behaviour)
     # ========================================================================
     fig, axes = plt.subplots(3, 3, figsize=(18, 12))
-    axes = axes.flatten()  # Convert 2D array to 1D for easier indexing
-    cmap = plt.get_cmap("tab10")  # Color map for multi-vial plots (10 colors)
+    axes = axes.flatten()
 
-    # Storage for fitted parameters (will be saved to CSV)
-    fit_results = []
-
-    # ========================================================================
-    # MAIN PLOTTING LOOP: Process each vial group
-    # ========================================================================
     for g_idx, group in enumerate(vial_groups):
-        ax = axes[g_idx]  # Get current subplot
+        ax = axes[g_idx]
 
-        # --------------------------------------------------------------------
-        # CASE 1: Single vial subplot
-        # --------------------------------------------------------------------
         if len(group) == 1:
             vial = group[0]
             if vial not in vial_to_idx:
                 continue
-            i = vial_to_idx[vial]  # Get row index for this vial
+            i = vial_to_idx[vial]
 
-            # ================================================================
-            # *** RAW DATA PLOTTING SECTION ***
-            # ================================================================
-            # Plot measured intensity data with error bars
-            # This is the experimental data before any curve fitting
-
-            # Plot error bars only (no markers, no line)
             ax.errorbar(
-                contrast_numbers,  # x-axis: echo times (ms)
-                mean_matrix[i, :],  # y-axis: mean intensity values
-                yerr=std_matrix[i, :],  # error bars: ± standard deviation
-                fmt="none",  # NO markers or lines (error bars only)
-                capsize=5,  # width of error bar caps
-                color="black",  # error bar color
-                alpha=0.5,  # slight transparency for error bars
+                contrast_numbers,
+                mean_matrix[i, :],
+                yerr=std_matrix[i, :],
+                fmt="none",
+                capsize=5,
+                color="black",
+                alpha=0.5,
             )
-
-            # Plot scatter points on top
             ax.scatter(
-                contrast_numbers,  # x-axis: echo times (ms)
-                mean_matrix[i, :],  # y-axis: mean intensity values
-                s=50,  # marker size
-                color="black",  # marker color
-                marker="o",  # circle markers
-                label=f"Vial {vial}",  # legend label
-                zorder=3,  # draw on top of error bars
+                contrast_numbers,
+                mean_matrix[i, :],
+                s=50,
+                color="black",
+                marker="o",
+                label=f"Vial {vial}",
+                zorder=3,
             )
-            # ================================================================
 
-            # Attempt to fit T2 mono-exponential decay curve to the data
-            try:
-                # Non-linear least squares curve fitting
-                # Keep covariance matrix for CI calculation
-                popt, pcov = curve_fit(
-                    mono_exp,  # Model function to fit
-                    contrast_numbers,  # x data (echo times)
-                    mean_matrix[i, :],  # y data (intensities)
-                    p0=(mean_matrix[i, 0], 100),  # Initial guesses: [S0, T2]
-                )
-                S0_fit, T2_fit = popt  # Extract fitted parameters
-
-                # Calculate fitted curve and goodness of fit (R²)
-                fit_signal = mono_exp(contrast_numbers, *popt)
-                r2 = calc_r2(mean_matrix[i, :], fit_signal)
-
-                # Store fit results for CSV output
-                fit_results.append(
-                    {"Vial": vial, "S0": S0_fit, "T2_ms": T2_fit, "R2": r2}
-                )
-
-                # ============================================================
-                # *** 95% CONFIDENCE INTERVAL CALCULATION ***
-                # ============================================================
-                # Create fine grid for smooth curve visualization
-                x_fit = np.linspace(min(contrast_numbers), max(contrast_numbers), 200)
-
-                # Calculate 95% CI via Monte Carlo sampling from parameter covariance
-                ci_lower = None
-                ci_upper = None
-                try:
-                    # Sample parameter space (1000 samples from multivariate normal)
-                    n_samples = 1000
-                    param_samples = np.random.multivariate_normal(popt, pcov, n_samples)
-
-                    # Generate predictions for each parameter sample
-                    predictions = np.array(
-                        [
-                            mono_exp(x_fit, sample[0], sample[1])
-                            for sample in param_samples
-                        ]
-                    )
-
-                    # Calculate 2.5th and 97.5th percentiles (95% CI)
-                    ci_lower = np.percentile(predictions, 2.5, axis=0)
-                    ci_upper = np.percentile(predictions, 97.5, axis=0)
-
-                except (np.linalg.LinAlgError, ValueError) as e:
-                    # Covariance matrix might be singular or ill-conditioned
-                    logger.warning(
-                        "Could not calculate 95%% CI for vial %s: %s", vial, e
-                    )
-
-                # ============================================================
-                # *** FITTED CURVE AND CI BAND PLOTTING ***
-                # ============================================================
-                # Plot 95% confidence interval band (if calculated successfully)
-                if ci_lower is not None and ci_upper is not None:
+            fit_entry = next((f for f in subplot_fits if f["vial"] == vial), None)
+            if fit_entry:
+                x_fit = np.array(fit_entry["x_fit"])
+                y_fit = np.array(fit_entry["y_fit"])
+                if fit_entry.get("ci_lower") and fit_entry.get("ci_upper"):
                     ax.fill_between(
                         x_fit,
-                        ci_lower,
-                        ci_upper,
-                        color="gray",  # Gray to match fitted curve
-                        alpha=0.2,  # Transparent (subtle background)
-                        zorder=1,  # Behind fitted curve and data
-                        label="95% CI",  # Legend label
+                        fit_entry["ci_lower"],
+                        fit_entry["ci_upper"],
+                        color="gray",
+                        alpha=0.2,
+                        zorder=1,
+                        label="95% CI",
                     )
+                ax.plot(x_fit, y_fit, "--", color="gray", alpha=0.8, zorder=2, label="T₂ fit")
 
-                # Plot smooth fitted curve (dashed line) over data
-                ax.plot(
-                    x_fit,
-                    mono_exp(x_fit, *popt),
-                    "--",  # Dashed line style
-                    color="gray",  # Gray color for fitted curve
-                    alpha=0.8,  # Slight transparency
-                    zorder=2,  # On top of CI band, below data
-                    label="T₂ fit",  # Legend label
-                )
-            except RuntimeError:
-                # Curve fitting failed for this vial
-                logger.warning("Could not fit T\u2082 for vial %s", vial)
-
-        # --------------------------------------------------------------------
-        # CASE 2: Multiple vials in one subplot
-        # --------------------------------------------------------------------
         else:
             for j, vial in enumerate(group):
                 if vial not in vial_to_idx:
                     continue
-                i = vial_to_idx[vial]  # Get row index for this vial
+                i = vial_to_idx[vial]
 
-                # ============================================================
-                # *** RAW DATA PLOTTING SECTION ***
-                # ============================================================
-                # Plot measured intensity data with error bars
-                # Each vial in the group gets a different color
-
-                # Plot error bars only (no markers, no line)
                 ax.errorbar(
-                    contrast_numbers,  # x-axis: echo times (ms)
-                    mean_matrix[i, :],  # y-axis: mean intensity values
-                    yerr=std_matrix[i, :],  # error bars: ± standard deviation
-                    fmt="none",  # NO markers or lines (error bars only)
-                    capsize=5,  # width of error bar caps
-                    color=cmap(j % 10),  # error bar color matches vial color
-                    alpha=0.5,  # slight transparency for error bars
+                    contrast_numbers,
+                    mean_matrix[i, :],
+                    yerr=std_matrix[i, :],
+                    fmt="none",
+                    capsize=5,
+                    color=cmap(j % 10),
+                    alpha=0.5,
                 )
-
-                # Plot scatter points on top
                 ax.scatter(
-                    contrast_numbers,  # x-axis: echo times (ms)
-                    mean_matrix[i, :],  # y-axis: mean intensity values
-                    s=50,  # marker size
-                    color=cmap(j % 10),  # marker color from colormap
-                    marker="o",  # circle markers
-                    label=f"Vial {vial}",  # legend label
-                    zorder=3,  # draw on top of error bars
+                    contrast_numbers,
+                    mean_matrix[i, :],
+                    s=50,
+                    color=cmap(j % 10),
+                    marker="o",
+                    label=f"Vial {vial}",
+                    zorder=3,
                 )
-                # ============================================================
 
-                # Attempt to fit T2 mono-exponential decay curve
-                try:
-                    # Non-linear least squares curve fitting
-                    # Keep covariance matrix for CI calculation
-                    popt, pcov = curve_fit(
-                        mono_exp,
-                        contrast_numbers,
-                        mean_matrix[i, :],
-                        p0=(mean_matrix[i, 0], 100),
-                    )
-                    S0_fit, T2_fit = popt
-
-                    # Calculate fitted curve and R²
-                    fit_signal = mono_exp(contrast_numbers, *popt)
-                    r2 = calc_r2(mean_matrix[i, :], fit_signal)
-
-                    # Store fit results
-                    fit_results.append(
-                        {"Vial": vial, "S0": S0_fit, "T2_ms": T2_fit, "R2": r2}
-                    )
-
-                    # ========================================================
-                    # *** 95% CONFIDENCE INTERVAL CALCULATION ***
-                    # ========================================================
-                    # Create fine grid for smooth curve
-                    x_fit = np.linspace(
-                        min(contrast_numbers), max(contrast_numbers), 200
-                    )
-
-                    # Calculate 95% CI via Monte Carlo sampling
-                    ci_lower = None
-                    ci_upper = None
-                    try:
-                        # Sample parameter space
-                        n_samples = 1000
-                        param_samples = np.random.multivariate_normal(
-                            popt, pcov, n_samples
-                        )
-
-                        # Generate predictions
-                        predictions = np.array(
-                            [
-                                mono_exp(x_fit, sample[0], sample[1])
-                                for sample in param_samples
-                            ]
-                        )
-
-                        # Calculate percentiles (95% CI)
-                        ci_lower = np.percentile(predictions, 2.5, axis=0)
-                        ci_upper = np.percentile(predictions, 97.5, axis=0)
-
-                    except (np.linalg.LinAlgError, ValueError) as e:
-                        print(f"[WARN] Could not calculate 95% CI for vial {vial}: {e}")
-
-                    # ========================================================
-                    # *** PLOT CI BAND AND FITTED CURVE ***
-                    # ========================================================
-                    # Plot 95% CI band (if calculated)
-                    if ci_lower is not None and ci_upper is not None:
+                fit_entry = next((f for f in subplot_fits if f["vial"] == vial), None)
+                if fit_entry:
+                    x_fit = np.array(fit_entry["x_fit"])
+                    y_fit = np.array(fit_entry["y_fit"])
+                    if fit_entry.get("ci_lower") and fit_entry.get("ci_upper"):
                         ax.fill_between(
                             x_fit,
-                            ci_lower,
-                            ci_upper,
-                            color=cmap(j % 10),  # Match vial color
-                            alpha=0.15,  # Very transparent
-                            zorder=1,  # Behind everything
+                            fit_entry["ci_lower"],
+                            fit_entry["ci_upper"],
+                            color=cmap(j % 10),
+                            alpha=0.15,
+                            zorder=1,
                         )
-
-                    # Plot smooth fitted curve (dashed, same color as data)
                     ax.plot(
-                        x_fit,
-                        mono_exp(x_fit, *popt),
-                        "--",  # Dashed line
-                        color=cmap(j % 10),  # Match data color
-                        alpha=0.8,
-                        zorder=2,  # On top of CI, below data
+                        x_fit, y_fit, "--", color=cmap(j % 10), alpha=0.8, zorder=2
                     )
-                except RuntimeError:
-                    print(f"[WARN] Could not fit T₂ for vial {vial}")
 
-            # Add legend for multi-vial subplots
             ax.legend(loc="upper right", fontsize=8)
 
-        # --------------------------------------------------------------------
-        # SUBPLOT FORMATTING: Set titles, limits, and labels
-        # --------------------------------------------------------------------
-        ax.set_title(" & ".join(group), fontsize=10)  # e.g., "D & P"
-        ax.set_ylim(min(yticks), max(yticks))  # Consistent y-axis range
-        ax.grid(True, axis="y", linestyle="--", alpha=0.5)  # Horizontal gridlines
+        ax.set_title(" & ".join(group), fontsize=10)
+        ax.set_ylim(min(yticks), max(yticks))
+        ax.grid(True, axis="y", linestyle="--", alpha=0.5)
 
-        # Only show y-axis labels on leftmost column
         if g_idx % 3 == 0:
             ax.set_yticks(yticks)
             ax.set_yticklabels([str(t) for t in yticks])
             ax.set_ylabel("Intensity", fontsize=9)
         else:
             ax.set_yticks(yticks)
-            ax.set_yticklabels([])  # Hide labels but keep tick marks
+            ax.set_yticklabels([])
 
-    # ========================================================================
-    # SPECIAL SUBPLOT: ROI Overlay (bottom-right position)
-    # ========================================================================
-    ax = axes[-1]  # Last subplot (position 9)
+    # ROI overlay in last subplot
+    ax = axes[-1]
     if roi_image and os.path.exists(roi_image):
-        # Display ROI overlay image if provided
         img = plt.imread(roi_image)
         ax.imshow(
             img,
@@ -487,48 +490,30 @@ def plot_vial_te_means_std(
         ax.set_yticks([])
         ax.set_title("ROI Overlay", fontsize=10)
     else:
-        # Hide subplot if no ROI image provided
         ax.axis("off")
 
-    # ========================================================================
-    # SAVE OUTPUTS: Plot and fitted parameters
-    # ========================================================================
     plt.tight_layout(rect=[0, 0, 1, 1])
     plt.savefig(output_file, dpi=300, bbox_inches="tight")
     logger.info("Publication-ready plot saved to %s", output_file)
-
-    # Save fitted T2 values to CSV
-    csv_output = os.path.splitext(output_file)[0] + "_T2_fits.csv"
-    pd.DataFrame(fit_results).to_csv(csv_output, index=False)
-    logger.info("Fitted parameters saved to %s", csv_output)
-
     plt.close(fig)
     return os.path.abspath(output_file)
 
 
-@click.command()
+@click.command("maps-te")
 @click.argument("contrast_files", nargs=-1, required=True)
+@click.option("-m", "--metric-dir", required=True, help="Directory with mean/std CSVs.")
+@click.option("-o", "--output", default="vial_summary_pub.png", show_default=True)
+@click.option("--annotate", is_flag=True, default=False)
+@click.option("--roi-image", default=None, help="ROI overlay PNG (PNG mode only).")
 @click.option(
-    "-m",
-    "--metric_dir",
-    required=True,
-    help="Directory containing the mean/std CSV files.",
-)
-@click.option(
-    "-o",
-    "--output",
-    default="vial_summary_pub.png",
+    "--format", "output_format",
+    default="html",
+    type=click.Choice(["html", "png"]),
     show_default=True,
-    help="Output filename for the plot.",
+    help="Output format: interactive HTML (default) or static PNG.",
 )
-@click.option("--annotate", is_flag=True, help="Annotate each point with mean ± std.")
-@click.option(
-    "--roi_image",
-    default=None,
-    help="Path to ROI overlay PNG image for the extra subplot.",
-)
-def main(contrast_files, metric_dir, output, annotate, roi_image):
-    """Plot grouped vial mean ± std with mono-exponential T₂ fitting and save fit metrics."""
+def main(contrast_files, metric_dir, output, annotate, roi_image, output_format):
+    """Plot vial mean ± std for T2 spin-echo with mono-exponential fitting."""
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     plot_vial_te_means_std(
         list(contrast_files),
@@ -536,6 +521,7 @@ def main(contrast_files, metric_dir, output, annotate, roi_image):
         output_file=output,
         annotate=annotate,
         roi_image=roi_image,
+        output_format=output_format,
     )
 
 

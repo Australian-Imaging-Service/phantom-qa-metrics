@@ -20,7 +20,7 @@ from fileformats.medimage import NiftiGz
 from fileformats.medimage.diffusion import Bval, Bvec
 from fileformats.text import Csv
 from fileformats.vendor.mrtrix3.medimage import (
-    ImageFormatWithDwiEncoding as MifDwi,
+    ImageFormatGz as MifDwi,
     ImageFormat as MifImage,
 )
 from pydra.compose import python, workflow
@@ -1657,6 +1657,7 @@ def CumulativeDwiPipeline(
             nocleanup=False,
             force=True,
             quiet=True,
+            config=[],
         ),
         name="step06_biascorr",
     )
@@ -2011,6 +2012,7 @@ def IsolatedDwiPipeline(
             nocleanup=False,
             force=True,
             quiet=True,
+            config=[],
         ),
         name="iso_biascorr",
     )

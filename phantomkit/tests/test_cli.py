@@ -58,9 +58,8 @@ def test_run_vial_signal_help(runner) -> None:
     result = runner.invoke(main, ["run", "vial-signal", "--help"])
     assert result.exit_code == 0
     assert "--template-dir" in result.output
-    assert "--rotation-library-file" in result.output
     assert "--output-base-dir" in result.output
-    assert "--plugin" in result.output
+    assert "--worker" in result.output
     assert "--pattern" in result.output
 
 
@@ -78,8 +77,6 @@ def test_run_vial_signal_single(runner, tmp_path) -> None:
     image = NiftiGz.sample(dest_dir=tmp_path, stem="t1")
     template_dir = tmp_path / "template"
     template_dir.mkdir()
-    rot_lib = tmp_path / "rotations.txt"
-    rot_lib.touch()
 
     mock_submitter = MagicMock()
     mock_submitter.__enter__ = MagicMock(return_value=mock_submitter)
@@ -96,17 +93,15 @@ def test_run_vial_signal_single(runner, tmp_path) -> None:
                 str(image),
                 "--template-dir",
                 str(template_dir),
-                "--rotation-library-file",
-                str(rot_lib),
                 "--output-base-dir",
                 str(tmp_path / "output"),
-                "--plugin",
+                "--worker",
                 "serial",
             ],
         )
 
     assert result.exit_code == 0, result.output
-    mock_sub.assert_called_once_with(plugin="serial")
+    mock_sub.assert_called_once_with(worker="serial")
     mock_submitter.assert_called_once()  # sub(wf)
 
 
@@ -122,8 +117,6 @@ def test_run_vial_signal_batch_from_dir(runner, tmp_path) -> None:
 
     template_dir = tmp_path / "template"
     template_dir.mkdir()
-    rot_lib = tmp_path / "rotations.txt"
-    rot_lib.touch()
 
     mock_submitter = MagicMock()
     mock_submitter.__enter__ = MagicMock(return_value=mock_submitter)
@@ -138,11 +131,9 @@ def test_run_vial_signal_batch_from_dir(runner, tmp_path) -> None:
                 str(tmp_path),
                 "--template-dir",
                 str(template_dir),
-                "--rotation-library-file",
-                str(rot_lib),
                 "--output-base-dir",
                 str(tmp_path / "output"),
-                "--plugin",
+                "--worker",
                 "serial",
                 "--pattern",
                 "*.nii.gz",
@@ -150,15 +141,13 @@ def test_run_vial_signal_batch_from_dir(runner, tmp_path) -> None:
         )
 
     assert result.exit_code == 0, result.output
-    mock_sub.assert_called_once_with(plugin="serial")
+    mock_sub.assert_called_once_with(worker="serial")
     mock_submitter.assert_called_once()  # sub(wf)
 
 
 def test_run_batch_no_matching_files(runner, tmp_path) -> None:
     template_dir = tmp_path / "template"
     template_dir.mkdir()
-    rot_lib = tmp_path / "rotations.txt"
-    rot_lib.touch()
 
     result = runner.invoke(
         main,
@@ -168,8 +157,6 @@ def test_run_batch_no_matching_files(runner, tmp_path) -> None:
             str(tmp_path),
             "--template-dir",
             str(template_dir),
-            "--rotation-library-file",
-            str(rot_lib),
             "--pattern",
             "*.nii.gz",
         ],
@@ -202,11 +189,11 @@ def test_plot_maps_ir_help(runner) -> None:
     result = runner.invoke(main, ["plot", "maps-ir", "--help"])
     assert result.exit_code == 0
     assert "CONTRAST_FILES" in result.output
-    assert "--metric_dir" in result.output
+    assert "--metric-dir" in result.output
 
 
 def test_plot_maps_te_help(runner) -> None:
     result = runner.invoke(main, ["plot", "maps-te", "--help"])
     assert result.exit_code == 0
     assert "CONTRAST_FILES" in result.output
-    assert "--metric_dir" in result.output
+    assert "--metric-dir" in result.output
