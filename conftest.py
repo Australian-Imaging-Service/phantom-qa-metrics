@@ -76,11 +76,17 @@ def make_project_id(dataset_name: str, run_prefix: ty.Optional[str] = None) -> s
 def upload_test_dataset_to_xnat(
     project_id: str, source_data_dir: Path, xnat_connect: ty.Any
 ) -> None:
-    """Upload one test dataset (one scan dir per source, one resource dir
-    per XNAT resource) to a freshly-created XNAT project/subject/session.
+    """Upload one test dataset to a freshly-created XNAT project/subject/session.
 
-    For each scan directory under ``source_data_dir``: if a ``DICOM/``
-    resource subdirectory exists, the scan's XNAT type/id are read from
+    Each scan directory under ``source_data_dir`` may lay out its resources
+    either flatly (``<scan>/<resource>/*`` — e.g. hand-authored synthetic
+    NIfTI test data) or nested under a ``resources/`` subdirectory, each
+    resource's files further nested under its own ``files/`` subdirectory
+    (``<scan>/resources/<resource>/files/*`` — XNAT's own on-disk archive
+    layout, e.g. a session copied directly from another XNAT instance's
+    archive or a downloaded session export). Both are handled the same way.
+
+    If a ``DICOM`` resource exists, the scan's XNAT type/id are read from
     that DICOM's headers (SeriesDescription/SeriesNumber); otherwise the
     scan directory's own name becomes the type directly (used for NIfTI-only
     test data, where there's no DICOM header to read a type from).
@@ -88,6 +94,15 @@ def upload_test_dataset_to_xnat(
     from frametree.core.utils import varname2path
     from fileformats.application import Dicom
     import xnat as xnat_pkg
+
+    def _resource_dirs(scan_dir: Path) -> list[Path]:
+        resources_root = scan_dir / "resources"
+        base = resources_root if resources_root.is_dir() else scan_dir
+        return [d for d in base.iterdir() if d.is_dir()]
+
+    def _resource_files_dir(resource_dir: Path) -> Path:
+        files_dir = resource_dir / "files"
+        return files_dir if files_dir.is_dir() else resource_dir
 
     with xnat_connect() as login:
         login.put(f"/data/archive/projects/{project_id}")
@@ -100,10 +115,13 @@ def upload_test_dataset_to_xnat(
         for test_scan_dir in source_data_dir.iterdir():
             if test_scan_dir.name.startswith("."):
                 continue
-            scan_id = test_scan_dir.stem
-            dicom_resource = test_scan_dir / "DICOM"
-            if dicom_resource.exists():
-                mdata = Dicom(next(dicom_resource.iterdir())).metadata
+            resource_dirs = _resource_dirs(test_scan_dir)
+            dicom_resource = next(
+                (d for d in resource_dirs if d.name.upper() == "DICOM"), None
+            )
+            if dicom_resource is not None:
+                dicom_files_dir = _resource_files_dir(dicom_resource)
+                mdata = Dicom(next(dicom_files_dir.iterdir())).metadata
                 scan_id = mdata["SeriesNumber"]
                 scan_type = mdata["SeriesDescription"]
             else:
@@ -111,11 +129,9 @@ def upload_test_dataset_to_xnat(
                 scan_type = varname2path(scan_id)
             xscan = xclasses.MrScanData(id=scan_id, type=scan_type, parent=xsession)
 
-            for resource_path in test_scan_dir.iterdir():
-                if not resource_path.is_dir():
-                    continue
-                xresource = xscan.create_resource(resource_path.stem)
-                xresource.upload_dir(resource_path, method="tar_file")
+            for resource_dir in resource_dirs:
+                xresource = xscan.create_resource(resource_dir.name)
+                xresource.upload_dir(_resource_files_dir(resource_dir), method="tar_file")
 
         try:
             login.put(f"/data/experiments/{xsession.id}?pullDataFromHeaders=true")

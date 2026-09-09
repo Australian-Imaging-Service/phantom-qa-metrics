@@ -22,3 +22,8 @@ __pycache__
 ~*
 *.venv
 _version.py
+
+# Real scan data for the XNAT CS integration test -- copied onto the test
+# VM separately, never committed (matches Australian-Imaging-Service/
+# pipelines' own tests/data convention).
+/tests/data/specs/phantom-qc/preprocess/scans/

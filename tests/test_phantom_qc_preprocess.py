@@ -26,8 +26,42 @@ SKIP_BUILD = False
 # non-Optional type given this fixed protocol).
 PHANTOM = "SPIRIT"
 
-TI_VALUES = [50, 100, 150, 250, 500, 1000, 1500, 2000, 3000, 5000, 7500, 9970]
-TE_VALUES = [14, 20, 40, 80, 160, 320, 640, 1000]
+# Real DICOM test data -- scan directories preserve the clinical
+# SeriesNumber-SeriesDescription naming convention and are laid out
+# XNAT-archive-style (<scan>/resources/<label>/files/*.dcm), which
+# upload_test_dataset_to_xnat's DICOM branch reads scan type/id from
+# directly. The match strings below are each series' exact
+# SeriesDescription (read from the real DICOM headers) -- note these use
+# hyphens after "SEQ" (e.g. "SEQ-B_..."), not the underscores the
+# directory names use (e.g. "27-SEQ_B_..."), since the folder-naming
+# convention sanitizes the description differently than the header itself.
+T1W_SCAN_TYPE = "SEQ-A_NIF_SAG_MPRAGE"
+DWI_SCAN_TYPE = "SEQ-B_NIF_AX_DWI_b1000_AP"
+RPE_SCAN_TYPE = "SEQ-B_NIF_AX_DWI_b1000_PA"
+TI_SCAN_TYPES = {
+    50: "SEQ-D_NIF_AX_T1_MAPS_TI_50",
+    100: "SEQ-D_NIF_AX_T1_MAPS_TI_100",
+    150: "SEQ-D_NIF_AX_T1_MAPS_TI_150",
+    250: "SEQ-D_NIF_AX_T1_MAPS_TI_250",
+    500: "SEQ-D_NIF_AX_T1_MAPS_TI_500",
+    1000: "SEQ-D_NIF_AX_T1_MAPS_TI_1000",
+    1500: "SEQ-D_NIF_AX_T1_MAPS_TI_1500",
+    2000: "SEQ-D_NIF_AX_T1_MAPS_TI_2000",
+    3000: "SEQ-D_NIF_AX_T1_MAPS_TI_3000",
+    5000: "SEQ-D_NIF_AX_T1_MAPS_TI_5000",
+    7500: "SEQ-D_NIF_AX_T1_MAPS_TI_7500",
+    9970: "SEQ-D_NIF_AX_T1_MAPS_TI_9970",
+}
+TE_SCAN_TYPES = {
+    14: "SEQ-E_NIF_AX_T2_MAPS_TE_14",
+    20: "SEQ-E_NIF_AX_T2_MAPS_TE_20",
+    40: "SEQ-E_NIF_AX_T2_MAPS_TE_40",
+    80: "SEQ-E_NIF_AX_T2_MAPS_TE_80",
+    160: "SEQ-E_NIF_AX_T2_MAPS_TE_160",
+    320: "SEQ-E_NIF_AX_T2_MAPS_TE_320",
+    640: "SEQ-E_NIF_AX_T2_MAPS_TE_640",
+    1000: "SEQ-E_NIF_AX_T2_MAPS_TE_1000",
+}
 
 
 def test_phantom_qc_preprocess_app(
@@ -42,7 +76,7 @@ def test_phantom_qc_preprocess_app(
 
     project_id = f"{run_prefix}phantomkitpreprocess"
 
-    test_data = test_data_dir / "specs" / "phantom-qc" / "preprocess"
+    test_data = test_data_dir / "specs" / "phantom-qc" / "preprocess" / "scans"
     upload_test_dataset_to_xnat(project_id, test_data, xnat_connect)
 
     # No license installation needed -- phantomkit's pipeline uses
@@ -79,16 +113,14 @@ def test_phantom_qc_preprocess_app(
 
     image_spec = XnatApp.load(SPEC_PATH)
 
-    # Every source's match value is just its own scan type -- the test data
-    # under tests/data/specs/phantom-qc/preprocess/ names each scan
-    # directory to match its source directly (no DICOM headers involved),
-    # matching the DWI test's own NIfTI-based approach in the pipelines repo.
+    # Every source's match value is the real DICOM SeriesDescription of the
+    # scan it should pick up (see the SCAN_TYPE constants above).
     command_inputs = {
-        "T1w": "T1w",
-        "DWI": "DWI",
-        "RPE": "RPE",
-        **{f"TI_{v}": f"TI_{v}" for v in TI_VALUES},
-        **{f"TE_{v}": f"TE_{v}" for v in TE_VALUES},
+        "T1w": T1W_SCAN_TYPE,
+        "DWI": DWI_SCAN_TYPE,
+        "RPE": RPE_SCAN_TYPE,
+        **{f"TI_{v}": t for v, t in TI_SCAN_TYPES.items()},
+        **{f"TE_{v}": t for v, t in TE_SCAN_TYPES.items()},
         "Phantom": PHANTOM,
     }
 
