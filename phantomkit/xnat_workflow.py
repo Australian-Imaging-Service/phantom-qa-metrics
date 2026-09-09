@@ -28,7 +28,8 @@ from pathlib import Path
 
 from pydra.compose import python, workflow
 from fileformats.medimage import NiftiGz
-from fileformats.vendor.mrtrix3.medimage import ImageIn, ImageOut
+from fileformats.medimage.diffusion import NiftiGzXBvec
+from fileformats.vendor.mrtrix3.medimage import ImageOut
 from fileformats.generic import Directory
 
 
@@ -69,8 +70,13 @@ def PhantomKitXnatWorkflow(
     t1w: NiftiGz,
     phantom: str,
     # ── DWI (always rpe_all: both AP and PA are full volumes) ────────────
-    dwi: ImageIn,
-    rpe: ImageIn,
+    # NiftiGzXBvec (not the DWISeriesWorkflow-internal ImageIn union type,
+    # which crashes frametree's Pipeline.inputs_validator -- issubclass()
+    # requires its first argument to be a real class, not a Union alias)
+    # -- a single concrete class, and a real member of the ImageIn union,
+    # so passing it into DWISeriesWorkflow's own dwi/rpe params is valid.
+    dwi: NiftiGzXBvec,
+    rpe: NiftiGzXBvec,
     # ── Native-contrast relaxometry (fixed: 12 TI + 8 TE) ─────────────────
     ti_50: NiftiGz, ti_100: NiftiGz, ti_150: NiftiGz, ti_250: NiftiGz,
     ti_500: NiftiGz, ti_1000: NiftiGz, ti_1500: NiftiGz, ti_2000: NiftiGz,
