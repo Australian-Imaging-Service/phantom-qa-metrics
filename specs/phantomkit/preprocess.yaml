@@ -2,10 +2,13 @@ title: "PhantomKit MRI phantom QC"
 schema_version: "2.0"
 version: "0.1.0"
 base_image:
-  # phantomkit's own published image already has mrtrix3, FSL, ANTs,
-  # dcm2niix, and an editable install of phantomkit itself (with all of
-  # its own pydra/fileformats dependencies) — see docker/Dockerfile. Only
-  # the XNAT CS packages below need adding on top.
+  # phantomkit's own published image already has mrtrix3, FSL, ANTs, and
+  # dcm2niix — see docker/Dockerfile. But pydra2app's XNAT CS entrypoint
+  # runs from its OWN separate conda env baked into the built image (not
+  # the base image's own venv), so phantomkit itself must still be listed
+  # below for the task module (phantomkit.xnat_workflow:...) to be
+  # importable from inside that env at container runtime -- matches how
+  # the pipelines repo's own specs list "australianimagingservice" here.
   name: arkiev/phantomkit
   package_manager: apt
   tag: latest
@@ -14,6 +17,10 @@ packages:
     pydra2app:
     frametree:
     frametree-xnat:
+    # --use-local-packages (passed at build time) bundles whatever local
+    # editable phantomkit checkout the build machine already has, rather
+    # than trying to fetch from PyPI (phantomkit isn't published there).
+    phantomkit:
 authors:
   - name: Arkiev D'Souza
     email: arkievdsouza@gmail.com
