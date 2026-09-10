@@ -166,10 +166,19 @@ def PhantomKitXnatWorkflow(
     # pointless. The others default to off, matching the CLI's own
     # --processing-steps default ("none" -- only tensor fitting), but are
     # exposed so a launch can opt in without a code change.
-    do_denoise: bool = False,
-    do_degibbs: bool = False,
-    do_biascorrect: bool = False,
-    gradcheck: bool = False,
+    #
+    # `bool | None` (not plain `bool`) because pydra2app's XNAT command
+    # builder serializes a `False` Python default as `default-value: ""`
+    # in the command JSON (it treats the default via `if default`, which
+    # can't tell False from unset), and at launch time converts any
+    # empty-string value for a non-str parameter into None -- so an
+    # unset boolean parameter arrives here as None, not False. A plain
+    # `bool` field rejects that None as a missing mandatory value; coerce
+    # it back to bool below instead.
+    do_denoise: bool | None = False,
+    do_degibbs: bool | None = False,
+    do_biascorrect: bool | None = False,
+    gradcheck: bool | None = False,
     rayleigh_correction: bool = False,
     cpu_threads: int = 1,
 ) -> Directory:
@@ -193,6 +202,11 @@ def PhantomKitXnatWorkflow(
     """
     from phantomkit.dwi_processing import DWISeriesWorkflow
     from phantomkit.phantom_processor import PhantomSessionWf, resolve_phantom_template
+
+    do_denoise = bool(do_denoise)
+    do_degibbs = bool(do_degibbs)
+    do_biascorrect = bool(do_biascorrect)
+    gradcheck = bool(gradcheck)
 
     template_dir = Path(template_data_root) / phantom
     resolved = resolve_phantom_template(template_dir)
