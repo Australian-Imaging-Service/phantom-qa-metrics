@@ -124,6 +124,22 @@ commands:
         field: eddy_options
         help: "Extra options string passed to dwifslpreproc's eddy step"
         default: " --slm=linear"
+      Denoise:
+        field: do_denoise
+        help: "Run dwidenoise before other DWI preprocessing steps"
+        default: false
+      Degibbs:
+        field: do_degibbs
+        help: "Run Gibbs-ringing removal (mrdegibbs) before other DWI preprocessing steps"
+        default: false
+      Biascorrect:
+        field: do_biascorrect
+        help: "Run dwibiascorrect (ANTs N4) after DWI preprocessing"
+        default: false
+      Gradcheck:
+        field: gradcheck
+        help: "Run dwigradcheck to verify/correct the DWI gradient table orientation"
+        default: false
     configuration: # Additional args passed to the task, not exposed as command inputs
       template_data_root: /phantomkit_resources/template_data
 resources:

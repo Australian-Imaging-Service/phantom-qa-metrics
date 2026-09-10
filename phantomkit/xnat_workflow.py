@@ -29,8 +29,77 @@ from pathlib import Path
 from pydra.compose import python, workflow
 from fileformats.medimage import NiftiGz
 from fileformats.medimage.diffusion import NiftiGzXBvec
-from fileformats.vendor.mrtrix3.medimage import ImageOut
+from fileformats.vendor.mrtrix3.medimage import ImageOut, ImageFormatGz
 from fileformats.generic import Directory
+
+
+@python.define(outputs=["mif"])
+def _EmbedGradients(dwi: NiftiGzXBvec, out_name: str) -> ImageFormatGz:
+    """Convert a NIfTI+bvec/bval(+json) bundle into a .mif.gz with the
+    gradient table embedded in its header.
+
+    DWISeriesWorkflow's internal mrtrix3 DWI tools (dwiextract, dwicat,
+    dwidenoise, ...) need gradients embedded in the image itself, not
+    sitting in separate sidecar files next to a plain NIfTI — mrtrix3's
+    auto-discovery for raw NIfTI input doesn't pick up sibling .bvec/.bval
+    files the way dcm2niix-produced NIfTI conventionally implies. This
+    mirrors cli.py's own ``mrconvert ... -fslgrad <bvec> <bval>`` step for
+    the CLI path exactly — DWISeriesWorkflow always expects an
+    already-gradient-embedded input, regardless of caller.
+    """
+    import subprocess
+    import tempfile
+    from pathlib import Path as _Path
+
+    bvec = next(p for p in dwi.fspaths if p.suffix == ".bvec")
+    bval = next(p for p in dwi.fspaths if p.suffix == ".bval")
+    json_sidecars = [p for p in dwi.fspaths if p.suffix == ".json"]
+
+    out_dir = _Path(tempfile.mkdtemp(prefix="embed_grad_"))
+    out_path = out_dir / f"{out_name}.mif.gz"
+
+    cmd = [
+        "mrconvert", str(dwi.fspath), str(out_path),
+        "-fslgrad", str(bvec), str(bval), "-force",
+    ]
+    if json_sidecars:
+        cmd += ["-json_import", str(json_sidecars[0])]
+    subprocess.run(cmd, check=True, capture_output=True)
+    return ImageFormatGz(str(out_path))
+
+
+@python.define(outputs=["files"])
+def _CombineStage2Contrasts(
+    t1_in_dwi: NiftiGz, adc: NiftiGz, fa: NiftiGz
+) -> list[NiftiGz]:
+    """Bundle Stage 1's three lazy outputs into one list[NiftiGz] field.
+
+    Pydra can't coerce a plain Python list containing several separate
+    lazy sub-workflow outputs directly into a list[NiftiGz]-typed
+    parameter at another task's call site (it expects the whole list to
+    come from one upstream task) — this task exists purely to be that one
+    upstream source.
+    """
+    return [t1_in_dwi, adc, fa]
+
+
+@python.define(outputs=["files"])
+def _CombineStage3Contrasts(
+    t1w: NiftiGz,
+    ti_50: NiftiGz, ti_100: NiftiGz, ti_150: NiftiGz, ti_250: NiftiGz,
+    ti_500: NiftiGz, ti_1000: NiftiGz, ti_1500: NiftiGz, ti_2000: NiftiGz,
+    ti_3000: NiftiGz, ti_5000: NiftiGz, ti_7500: NiftiGz, ti_9970: NiftiGz,
+    te_14: NiftiGz, te_20: NiftiGz, te_40: NiftiGz, te_80: NiftiGz,
+    te_160: NiftiGz, te_320: NiftiGz, te_640: NiftiGz, te_1000: NiftiGz,
+) -> list[NiftiGz]:
+    """Bundle the MPRAGE + 12 TI + 8 TE workflow inputs into one list[NiftiGz]
+    field — same reason as _CombineStage2Contrasts above."""
+    return [
+        t1w,
+        ti_50, ti_100, ti_150, ti_250, ti_500, ti_1000,
+        ti_1500, ti_2000, ti_3000, ti_5000, ti_7500, ti_9970,
+        te_14, te_20, te_40, te_80, te_160, te_320, te_640, te_1000,
+    ]
 
 
 @python.define(outputs=["out_dir"])
@@ -91,6 +160,16 @@ def PhantomKitXnatWorkflow(
     # ── Processing options ─────────────────────────────────────────────────
     readout_time: float = 0.05,
     eddy_options: str = " --slm=linear",
+    # do_fslpreproc is NOT exposed/optional -- it's the eddy/topup
+    # correction step rpe_all (FPE+RPE) data exists for; leaving it off
+    # (DWISeriesWorkflow's own default) would make collecting RPE data
+    # pointless. The others default to off, matching the CLI's own
+    # --processing-steps default ("none" -- only tensor fitting), but are
+    # exposed so a launch can opt in without a code change.
+    do_denoise: bool = False,
+    do_degibbs: bool = False,
+    do_biascorrect: bool = False,
+    gradcheck: bool = False,
     rayleigh_correction: bool = False,
     cpu_threads: int = 1,
 ) -> Directory:
@@ -136,21 +215,41 @@ def PhantomKitXnatWorkflow(
         return str(out_dir)
 
     # ── Stage 1: DWI preprocessing ────────────────────────────────────────
+    # DWISeriesWorkflow's internal mrtrix3 DWI tools need the gradient
+    # table embedded in the image itself (matches cli.py's own
+    # `mrconvert -fslgrad ...` step) -- the raw NiftiGzXBvec sources
+    # (nii + separate .bvec/.bval sidecars) aren't auto-discovered by
+    # mrtrix3's lower-level DWI tools the way dcm2niix output implicitly
+    # is, so embed them explicitly first.
+    dwi_mif = workflow.add(_EmbedGradients(dwi=dwi, out_name="DWI_AP"), name="embed_dwi_grad")
+    rpe_mif = workflow.add(_EmbedGradients(dwi=rpe, out_name="DWI_PA"), name="embed_rpe_grad")
+
     dwi_wf = workflow.add(
         DWISeriesWorkflow(
             t1w=t1w,
-            dwi=dwi,
+            dwi=dwi_mif.mif,
             dwi_pe_dir="AP",
             preproc_mode="rpe_all",
-            rpe=rpe,
+            rpe=rpe_mif.mif,
             readout_time=readout_time,
             eddy_options=eddy_options,
+            do_denoise=do_denoise,
+            do_degibbs=do_degibbs,
+            do_fslpreproc=True,
+            do_biascorrect=do_biascorrect,
+            gradcheck=gradcheck,
         ),
         name="dwi_processing",
     )
 
     # ── Stage 2: phantom QC in DWI space (parallel with Stage 3) ──────────
     stage2_dir = _new_qc_output_dir("phantomkit_stage2_")
+    stage2_contrasts = workflow.add(
+        _CombineStage2Contrasts(
+            t1_in_dwi=dwi_wf.t1_in_dwi, adc=dwi_wf.adc, fa=dwi_wf.fa,
+        ),
+        name="stage2_combine",
+    )
     stage2 = workflow.add(
         PhantomSessionWf(
             input_image=dwi_wf.t1_in_dwi,
@@ -162,7 +261,7 @@ def PhantomKitXnatWorkflow(
             session_name="stage2_dwi_space",
             phantom_name=phantom_name,
             template_dir_parent=template_dir_parent,
-            contrast_files=[dwi_wf.t1_in_dwi, dwi_wf.adc, dwi_wf.fa],
+            contrast_files=stage2_contrasts.files,
             rayleigh_correction=rayleigh_correction,
             cpu_threads=cpu_threads,
         ),
@@ -171,6 +270,17 @@ def PhantomKitXnatWorkflow(
 
     # ── Stage 3: native-contrast QC (MPRAGE + 12 TI + 8 TE) ────────────────
     stage3_dir = _new_qc_output_dir("phantomkit_stage3_")
+    stage3_contrasts = workflow.add(
+        _CombineStage3Contrasts(
+            t1w=t1w,
+            ti_50=ti_50, ti_100=ti_100, ti_150=ti_150, ti_250=ti_250,
+            ti_500=ti_500, ti_1000=ti_1000, ti_1500=ti_1500, ti_2000=ti_2000,
+            ti_3000=ti_3000, ti_5000=ti_5000, ti_7500=ti_7500, ti_9970=ti_9970,
+            te_14=te_14, te_20=te_20, te_40=te_40, te_80=te_80,
+            te_160=te_160, te_320=te_320, te_640=te_640, te_1000=te_1000,
+        ),
+        name="stage3_combine",
+    )
     stage3 = workflow.add(
         PhantomSessionWf(
             input_image=t1w,
@@ -182,12 +292,7 @@ def PhantomKitXnatWorkflow(
             session_name="stage3_native_contrast",
             phantom_name=phantom_name,
             template_dir_parent=template_dir_parent,
-            contrast_files=[
-                t1w,
-                ti_50, ti_100, ti_150, ti_250, ti_500, ti_1000,
-                ti_1500, ti_2000, ti_3000, ti_5000, ti_7500, ti_9970,
-                te_14, te_20, te_40, te_80, te_160, te_320, te_640, te_1000,
-            ],
+            contrast_files=stage3_contrasts.files,
             rayleigh_correction=rayleigh_correction,
             cpu_threads=cpu_threads,
         ),
