@@ -140,6 +140,10 @@ commands:
         field: gradcheck
         help: "Run dwigradcheck to verify/correct the DWI gradient table orientation"
         default: false
+      RunDwiQc:
+        field: run_dwi_qc
+        help: "Run DWI preprocessing (Stage 1) and DWI-space QC (Stage 2). Set false to produce only stage3_native_contrast_qc, skipping DWI processing entirely (DWI/RPE are still required sources but go unused)"
+        default: true
     configuration: # Additional args passed to the task, not exposed as command inputs
       template_data_root: /phantomkit_resources/template_data
 resources:

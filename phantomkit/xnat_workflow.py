@@ -68,6 +68,33 @@ def _EmbedGradients(dwi: NiftiGzXBvec, out_name: str) -> ImageFormatGz:
     return ImageFormatGz(str(out_path))
 
 
+def _rename_contrasts(named: dict) -> list:
+    """Copy each contrast to a fresh path stemmed by its own source name.
+
+    phantom_processor.py's per-contrast classification (TI vs TE vs
+    anatomical vs ADC/FA) and output naming both derive identity purely
+    from each input file's own local path stem — frametree/pydra2app
+    stage downloaded XNAT sources under their own (non-descriptive, and
+    not guaranteed distinct) local cache filenames, so without this
+    rename every contrast collides on whatever generic stem staging used,
+    silently overwriting all but the last-processed contrast's output.
+    Renaming here (not in phantom_processor.py) keeps the CLI's own
+    already-correct file-naming untouched.
+    """
+    import shutil
+    import tempfile
+    from pathlib import Path as _Path
+    from fileformats.medimage import NiftiGz as _NiftiGz
+
+    out_dir = _Path(tempfile.mkdtemp(prefix="named_contrasts_"))
+    renamed = []
+    for name, fileset in named.items():
+        dest = out_dir / f"{name}.nii.gz"
+        shutil.copy2(str(fileset), dest)
+        renamed.append(_NiftiGz(dest))
+    return renamed
+
+
 @python.define(outputs=["files"])
 def _CombineStage2Contrasts(
     t1_in_dwi: NiftiGz, adc: NiftiGz, fa: NiftiGz
@@ -78,9 +105,11 @@ def _CombineStage2Contrasts(
     lazy sub-workflow outputs directly into a list[NiftiGz]-typed
     parameter at another task's call site (it expects the whole list to
     come from one upstream task) — this task exists purely to be that one
-    upstream source.
+    upstream source. Also renames each to its own identity (T1_in_DWI /
+    ADC / FA — "FA" uppercase to match phantom_processor.py's
+    case-sensitive FA-classification regex) via _rename_contrasts.
     """
-    return [t1_in_dwi, adc, fa]
+    return _rename_contrasts({"T1_in_DWI": t1_in_dwi, "ADC": adc, "FA": fa})
 
 
 @python.define(outputs=["files"])
@@ -93,13 +122,17 @@ def _CombineStage3Contrasts(
     te_160: NiftiGz, te_320: NiftiGz, te_640: NiftiGz, te_1000: NiftiGz,
 ) -> list[NiftiGz]:
     """Bundle the MPRAGE + 12 TI + 8 TE workflow inputs into one list[NiftiGz]
-    field — same reason as _CombineStage2Contrasts above."""
-    return [
-        t1w,
-        ti_50, ti_100, ti_150, ti_250, ti_500, ti_1000,
-        ti_1500, ti_2000, ti_3000, ti_5000, ti_7500, ti_9970,
-        te_14, te_20, te_40, te_80, te_160, te_320, te_640, te_1000,
-    ]
+    field — same reason as _CombineStage2Contrasts above, and likewise
+    renames each to its own source name (T1w, TI_50, ..., TE_1000) via
+    _rename_contrasts."""
+    return _rename_contrasts({
+        "T1w": t1w,
+        "TI_50": ti_50, "TI_100": ti_100, "TI_150": ti_150, "TI_250": ti_250,
+        "TI_500": ti_500, "TI_1000": ti_1000, "TI_1500": ti_1500, "TI_2000": ti_2000,
+        "TI_3000": ti_3000, "TI_5000": ti_5000, "TI_7500": ti_7500, "TI_9970": ti_9970,
+        "TE_14": te_14, "TE_20": te_20, "TE_40": te_40, "TE_80": te_80,
+        "TE_160": te_160, "TE_320": te_320, "TE_640": te_640, "TE_1000": te_1000,
+    })
 
 
 @python.define(outputs=["out_dir"])
@@ -126,6 +159,29 @@ def FinalizeOutputs(
 
     stage2_dest = out / "stage2_dwi_space_qc"
     shutil.copytree(str(stage2_dir), stage2_dest, dirs_exist_ok=True)
+
+    stage3_dest = out / "stage3_native_contrast_qc"
+    shutil.copytree(str(stage3_dir), stage3_dest, dirs_exist_ok=True)
+
+    return Directory(str(out))
+
+
+@python.define(outputs=["out_dir"])
+def FinalizeNativeContrastOnly(
+    stage3_dir: Directory,
+    output_dir_str: str,
+) -> Directory:
+    """Bundle Stage 3 (native-contrast QC) alone into one Directory sink.
+
+    Used when ``run_dwi_qc=False`` skips Stage 1/2 entirely -- kept as a
+    separate task (rather than making FinalizeOutputs' dwi_preproc/
+    stage2_dir Optional) since Optional FileSet-typed pydra fields are a
+    confirmed crash in this pydra/frametree version stack.
+    """
+    import shutil
+
+    out = Path(output_dir_str)
+    out.mkdir(parents=True, exist_ok=True)
 
     stage3_dest = out / "stage3_native_contrast_qc"
     shutil.copytree(str(stage3_dir), stage3_dest, dirs_exist_ok=True)
@@ -179,6 +235,12 @@ def PhantomKitXnatWorkflow(
     do_degibbs: bool | None = False,
     do_biascorrect: bool | None = False,
     gradcheck: bool | None = False,
+    # Skips Stage 1 (DWI preprocessing) and Stage 2 (DWI-space QC)
+    # entirely when False -- output has only stage3_native_contrast_qc/.
+    # dwi/rpe stay mandatory sources regardless (fixed protocol), just
+    # unused when off. `bool | None` for the same reason as the four
+    # flags above.
+    run_dwi_qc: bool | None = True,
     rayleigh_correction: bool = False,
     cpu_threads: int = 1,
 ) -> Directory:
@@ -207,6 +269,7 @@ def PhantomKitXnatWorkflow(
     do_degibbs = bool(do_degibbs)
     do_biascorrect = bool(do_biascorrect)
     gradcheck = bool(gradcheck)
+    run_dwi_qc = bool(run_dwi_qc) if run_dwi_qc is not None else True
 
     template_dir = Path(template_data_root) / phantom
     resolved = resolve_phantom_template(template_dir)
@@ -228,59 +291,64 @@ def PhantomKitXnatWorkflow(
             (out_dir / sub).mkdir(parents=True, exist_ok=True)
         return str(out_dir)
 
-    # ── Stage 1: DWI preprocessing ────────────────────────────────────────
-    # DWISeriesWorkflow's internal mrtrix3 DWI tools need the gradient
-    # table embedded in the image itself (matches cli.py's own
-    # `mrconvert -fslgrad ...` step) -- the raw NiftiGzXBvec sources
-    # (nii + separate .bvec/.bval sidecars) aren't auto-discovered by
-    # mrtrix3's lower-level DWI tools the way dcm2niix output implicitly
-    # is, so embed them explicitly first.
-    dwi_mif = workflow.add(_EmbedGradients(dwi=dwi, out_name="DWI_AP"), name="embed_dwi_grad")
-    rpe_mif = workflow.add(_EmbedGradients(dwi=rpe, out_name="DWI_PA"), name="embed_rpe_grad")
+    # ── Stage 1 + 2: DWI preprocessing and DWI-space QC (skippable) ───────
+    # Branching on a concrete bool here (not a lazy field, since
+    # run_dwi_qc arrives as a plain Python value at workflow-construction
+    # time) mirrors the same pattern fileformats' own ExtendedDcm2niix
+    # converter workflow uses for its to_4d/extract_volume options.
+    if run_dwi_qc:
+        # DWISeriesWorkflow's internal mrtrix3 DWI tools need the gradient
+        # table embedded in the image itself (matches cli.py's own
+        # `mrconvert -fslgrad ...` step) -- the raw NiftiGzXBvec sources
+        # (nii + separate .bvec/.bval sidecars) aren't auto-discovered by
+        # mrtrix3's lower-level DWI tools the way dcm2niix output implicitly
+        # is, so embed them explicitly first.
+        dwi_mif = workflow.add(_EmbedGradients(dwi=dwi, out_name="DWI_AP"), name="embed_dwi_grad")
+        rpe_mif = workflow.add(_EmbedGradients(dwi=rpe, out_name="DWI_PA"), name="embed_rpe_grad")
 
-    dwi_wf = workflow.add(
-        DWISeriesWorkflow(
-            t1w=t1w,
-            dwi=dwi_mif.mif,
-            dwi_pe_dir="AP",
-            preproc_mode="rpe_all",
-            rpe=rpe_mif.mif,
-            readout_time=readout_time,
-            eddy_options=eddy_options,
-            do_denoise=do_denoise,
-            do_degibbs=do_degibbs,
-            do_fslpreproc=True,
-            do_biascorrect=do_biascorrect,
-            gradcheck=gradcheck,
-        ),
-        name="dwi_processing",
-    )
+        dwi_wf = workflow.add(
+            DWISeriesWorkflow(
+                t1w=t1w,
+                dwi=dwi_mif.mif,
+                dwi_pe_dir="AP",
+                preproc_mode="rpe_all",
+                rpe=rpe_mif.mif,
+                readout_time=readout_time,
+                eddy_options=eddy_options,
+                do_denoise=do_denoise,
+                do_degibbs=do_degibbs,
+                do_fslpreproc=True,
+                do_biascorrect=do_biascorrect,
+                gradcheck=gradcheck,
+            ),
+            name="dwi_processing",
+        )
 
-    # ── Stage 2: phantom QC in DWI space (parallel with Stage 3) ──────────
-    stage2_dir = _new_qc_output_dir("phantomkit_stage2_")
-    stage2_contrasts = workflow.add(
-        _CombineStage2Contrasts(
-            t1_in_dwi=dwi_wf.t1_in_dwi, adc=dwi_wf.adc, fa=dwi_wf.fa,
-        ),
-        name="stage2_combine",
-    )
-    stage2 = workflow.add(
-        PhantomSessionWf(
-            input_image=dwi_wf.t1_in_dwi,
-            template_phantom=template_phantom,
-            vial_masks=vial_masks,
-            adc_vials=adc_vials,
-            output_prefix=str(Path(stage2_dir) / "tmp" / "stage2_Transformed_"),
-            output_dir_str=stage2_dir,
-            session_name="stage2_dwi_space",
-            phantom_name=phantom_name,
-            template_dir_parent=template_dir_parent,
-            contrast_files=stage2_contrasts.files,
-            rayleigh_correction=rayleigh_correction,
-            cpu_threads=cpu_threads,
-        ),
-        name="stage2_qc",
-    )
+        # ── Stage 2: phantom QC in DWI space (parallel with Stage 3) ──────
+        stage2_dir = _new_qc_output_dir("phantomkit_stage2_")
+        stage2_contrasts = workflow.add(
+            _CombineStage2Contrasts(
+                t1_in_dwi=dwi_wf.t1_in_dwi, adc=dwi_wf.adc, fa=dwi_wf.fa,
+            ),
+            name="stage2_combine",
+        )
+        stage2 = workflow.add(
+            PhantomSessionWf(
+                input_image=dwi_wf.t1_in_dwi,
+                template_phantom=template_phantom,
+                vial_masks=vial_masks,
+                adc_vials=adc_vials,
+                output_prefix=str(Path(stage2_dir) / "tmp" / "stage2_Transformed_"),
+                output_dir_str=stage2_dir,
+                session_name="stage2_dwi_space",
+                phantom_name=phantom_name,
+                template_dir_parent=template_dir_parent,
+                contrast_files=stage2_contrasts.files,
+                rayleigh_correction=rayleigh_correction,
+                cpu_threads=cpu_threads,
+            ),
+            name="stage2_qc",
+        )
 
     # ── Stage 3: native-contrast QC (MPRAGE + 12 TI + 8 TE) ────────────────
     stage3_dir = _new_qc_output_dir("phantomkit_stage3_")
@@ -314,14 +382,23 @@ def PhantomKitXnatWorkflow(
     )
 
     # ── Finalize: bundle everything into one Directory sink ───────────────
-    final = workflow.add(
-        FinalizeOutputs(
-            dwi_preproc=dwi_wf.dwi_preproc,
-            stage2_dir=stage2.out_dir,
-            stage3_dir=stage3.out_dir,
-            output_dir_str=tempfile.mkdtemp(prefix="phantomkit_out_"),
-        ),
-        name="finalize",
-    )
+    if run_dwi_qc:
+        final = workflow.add(
+            FinalizeOutputs(
+                dwi_preproc=dwi_wf.dwi_preproc,
+                stage2_dir=stage2.out_dir,
+                stage3_dir=stage3.out_dir,
+                output_dir_str=tempfile.mkdtemp(prefix="phantomkit_out_"),
+            ),
+            name="finalize",
+        )
+    else:
+        final = workflow.add(
+            FinalizeNativeContrastOnly(
+                stage3_dir=stage3.out_dir,
+                output_dir_str=tempfile.mkdtemp(prefix="phantomkit_out_"),
+            ),
+            name="finalize",
+        )
 
     return final.out_dir
