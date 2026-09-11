@@ -157,11 +157,21 @@ def FinalizeOutputs(
     dwi_dest.mkdir(exist_ok=True)
     shutil.copy2(str(dwi_preproc), dwi_dest / Path(str(dwi_preproc)).name)
 
+    # Per-contrast PNG scatter plots are redundant with the T1/T2 mapping
+    # HTML reports (which cover the same fitted data) -- excluded from the
+    # uploaded XNAT resource to cut noise/size, without touching
+    # phantom_processor.py's own PNG generation (still used by the CLI).
     stage2_dest = out / "stage2_dwi_space_qc"
-    shutil.copytree(str(stage2_dir), stage2_dest, dirs_exist_ok=True)
+    shutil.copytree(
+        str(stage2_dir), stage2_dest, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("*.png"),
+    )
 
     stage3_dest = out / "stage3_native_contrast_qc"
-    shutil.copytree(str(stage3_dir), stage3_dest, dirs_exist_ok=True)
+    shutil.copytree(
+        str(stage3_dir), stage3_dest, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("*.png"),
+    )
 
     return Directory(str(out))
 
@@ -184,7 +194,10 @@ def FinalizeNativeContrastOnly(
     out.mkdir(parents=True, exist_ok=True)
 
     stage3_dest = out / "stage3_native_contrast_qc"
-    shutil.copytree(str(stage3_dir), stage3_dest, dirs_exist_ok=True)
+    shutil.copytree(
+        str(stage3_dir), stage3_dest, dirs_exist_ok=True,
+        ignore=shutil.ignore_patterns("*.png"),
+    )
 
     return Directory(str(out))
 
