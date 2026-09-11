@@ -122,11 +122,15 @@ def test_phantom_qc_preprocess_app(
         **{f"TI_{v}": t for v, t in TI_SCAN_TYPES.items()},
         **{f"TE_{v}": t for v, t in TE_SCAN_TYPES.items()},
         "Phantom": PHANTOM,
-        # DWI/RPE are still required sources (fixed protocol), but Stage 1
-        # (DWI preprocessing) and Stage 2 (DWI-space QC) are skipped --
-        # iterating on Stage 3 (native-contrast QC) alone doesn't need the
-        # slow eddy/topup correction step run every time.
-        "RunDwiQc": "false",
+        # Full pipeline: Stage 1 (DWI preprocessing) + Stage 2 (DWI-space
+        # QC) + Stage 3 (native-contrast QC). All optional DWI processing
+        # steps on except Gradcheck. do_fslpreproc (eddy/topup) itself is
+        # always on, not exposed as a parameter.
+        "RunDwiQc": "true",
+        "Denoise": "true",
+        "Degibbs": "true",
+        "Biascorrect": "true",
+        "Gradcheck": "false",
     }
 
     with xnat_connect() as xlogin:
